@@ -67,6 +67,12 @@ const LAZY_GLUE: &[LazyGlue] = &[
         globals: &[],
     },
     LazyGlue {
+        file: "node/path_minimatch.js",
+        src: pi_embed::include_str!("../../js/node/path_minimatch.js"),
+        builtins: &[],
+        globals: &[],
+    },
+    LazyGlue {
         file: "node/util.js",
         src: pi_embed::include_str!("../../js/node/util.js"),
         builtins: &["util", "util/types"],

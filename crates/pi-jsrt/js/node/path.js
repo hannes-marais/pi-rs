@@ -313,7 +313,7 @@ const posix = {
     return ret;
   },
   matchesGlob(path, pattern) {
-    return internal.globToRegExp(pattern).test(path);
+    return pathMatchesGlob(path, pattern, false);
   },
 };
 
@@ -1434,8 +1434,7 @@ const win32 = {
   },
 
   matchesGlob(path, pattern) {
-    // The existing glob matcher is retained; full minimatch parity remains tracked.
-    return internal.globToRegExp(pattern).test(path);
+    return pathMatchesGlob(path, pattern, true);
   },
 
   sep: '\\',
@@ -1445,33 +1444,20 @@ const win32 = {
 };
 
 
-internal.globToRegExp = (pattern) => {
-  let re = "";
-  for (let i = 0; i < pattern.length; i++) {
-    const c = pattern[i];
-    if (c === "*") {
-      if (pattern[i + 1] === "*") {
-        re += ".*";
-        i++;
-        if (pattern[i + 1] === "/") i++;
-      } else re += "[^/]*";
-    } else if (c === "?") re += "[^/]";
-    else if (c === "{") {
-      const end = pattern.indexOf("}", i);
-      if (end > i) {
-        re += `(?:${pattern.slice(i + 1, end).split(",").map((s) => s.replace(/[.+^$()|[\]\\]/g, "\\$&")).join("|")})`;
-        i = end;
-      } else re += "\\{";
-    } else if (c === "[") {
-      const end = pattern.indexOf("]", i);
-      if (end > i) {
-        re += pattern.slice(i, end + 1).replace("[!", "[^");
-        i = end;
-      } else re += "\\[";
-    } else re += c.replace(/[.+^$()|\\]/g, "\\$&");
-  }
-  return new RegExp(`^${re}$`);
-};
+function pathMatchesGlob(path, pattern, windows) {
+  assertPath(path, "path");
+  assertPath(pattern, "pattern");
+  internal.loadGlue("node/path_minimatch.js");
+  return internal.pathMinimatch(path, pattern, {
+    nocase: ops.config.platform === "darwin" || ops.config.platform === "win32",
+    windowsPathsNoEscape: true,
+    nonegate: true,
+    nocomment: true,
+    optimizationLevel: 2,
+    platform: windows ? "win32" : "posix",
+    nocaseMagicOnly: true,
+  });
+}
 
 posix.posix = posix;
 posix.win32 = win32;
