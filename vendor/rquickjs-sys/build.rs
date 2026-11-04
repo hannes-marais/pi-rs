@@ -185,10 +185,10 @@ fn main() {
 
     if target_os == "windows" {
         if target_env == "msvc" {
-            env::set_var(
-                "CFLAGS",
-                "/DWIN32_LEAN_AND_MEAN /std:c11 /experimental:c11atomics",
-            );
+            env::set_var("CFLAGS", "/DWIN32_LEAN_AND_MEAN /std:c11");
+            // MSVC requires this switch for C11 atomics; clang-cl implements
+            // them without it and treats the unknown switch as a file path.
+            builder.flag_if_supported("/experimental:c11atomics");
         } else {
             env::set_var("CFLAGS", "-DWIN32_LEAN_AND_MEAN -std=c11");
         }
