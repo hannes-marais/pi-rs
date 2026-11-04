@@ -25,3 +25,7 @@ include!("inlines/ptr_64.rs");
 include!("inlines/ptr_32_nan_boxing.rs");
 
 include!("inlines/common.rs");
+
+#[cfg(test)]
+#[path = "../tests/native_engine.rs"]
+mod native_engine;
