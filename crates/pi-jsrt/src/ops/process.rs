@@ -5,6 +5,7 @@ use crate::js::{Context, JsArgs, JsObject, JsResult, JsString, JsValue, js_strin
 use super::{array, object};
 use crate::engine::{OpFn, arg_f64, arg_opt_string, js_str, state};
 
+#[cfg(unix)]
 fn hostname() -> String {
     let mut buf = [0u8; 256];
     // SAFETY: buffer is valid for its length; gethostname NUL-terminates on success.
@@ -16,6 +17,19 @@ fn hostname() -> String {
     String::from_utf8_lossy(&buf[..end]).into_owned()
 }
 
+#[cfg(windows)]
+fn hostname() -> String {
+    use windows_sys::Win32::System::WindowsProgramming::GetComputerNameW;
+
+    let mut buf = [0u16; 256];
+    let mut len = buf.len() as u32;
+    // SAFETY: buf is writable for len UTF-16 code units and len is initialized.
+    if unsafe { GetComputerNameW(buf.as_mut_ptr(), &mut len) } == 0 {
+        return "localhost".into();
+    }
+    String::from_utf16_lossy(&buf[..len as usize])
+}
+
 struct Uname {
     sysname: String,
     release: String,
@@ -23,6 +37,7 @@ struct Uname {
     machine: String,
 }
 
+#[cfg(unix)]
 fn uname() -> Uname {
     // SAFETY: utsname is plain data; uname fills it.
     let mut u: libc::utsname = unsafe { std::mem::zeroed() };
@@ -33,7 +48,7 @@ fn uname() -> Uname {
     };
     if !ok {
         return Uname {
-            sysname: "Linux".into(),
+            sysname: std::env::consts::OS.into(),
             release: String::new(),
             version: String::new(),
             machine: std::env::consts::ARCH.into(),
@@ -44,6 +59,24 @@ fn uname() -> Uname {
         release: f(&u.release),
         version: f(&u.version),
         machine: f(&u.machine),
+    }
+}
+
+#[cfg(windows)]
+fn uname() -> Uname {
+    use windows_sys::Win32::System::SystemInformation::{GetVersionExW, OSVERSIONINFOW};
+
+    let mut info = OSVERSIONINFOW {
+        dwOSVersionInfoSize: std::mem::size_of::<OSVERSIONINFOW>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: info has the size declared in dwOSVersionInfoSize and remains writable.
+    let ok = unsafe { GetVersionExW(&mut info) } != 0;
+    Uname {
+        sysname: "Windows_NT".into(),
+        release: if ok { format!("{}.{}", info.dwMajorVersion, info.dwMinorVersion) } else { String::new() },
+        version: if ok { info.dwBuildNumber.to_string() } else { String::new() },
+        machine: std::env::consts::ARCH.into(),
     }
 }
 

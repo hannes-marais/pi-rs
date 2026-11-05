@@ -3244,6 +3244,7 @@ dependencies = [
  "uuid",
  "wasmi",
  "webpki-roots",
+ "windows-sys 0.61.2",
  "x25519-dalek",
  "zlib-rs",
 ]
