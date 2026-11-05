@@ -240,6 +240,7 @@ fn spawn_reader<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
     })
 }
 
+#[cfg(unix)]
 fn signal_name(sig: i32) -> &'static str {
     match sig {
         libc::SIGHUP => "SIGHUP",
@@ -258,11 +259,18 @@ fn signal_name(sig: i32) -> &'static str {
 }
 
 fn status_parts(status: &std::process::ExitStatus) -> (JsValue, JsValue) {
+    #[cfg(unix)]
+    {
     use std::os::unix::process::ExitStatusExt;
     match (status.code(), status.signal()) {
         (Some(c), _) => (JsValue::from(c), JsValue::null()),
         (None, Some(s)) => (JsValue::null(), js_str(signal_name(s))),
         _ => (JsValue::null(), JsValue::null()),
+    }
+    }
+    #[cfg(windows)]
+    {
+        (status.code().map(JsValue::from).unwrap_or_else(JsValue::null), JsValue::null())
     }
 }
 
