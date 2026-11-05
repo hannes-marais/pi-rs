@@ -373,30 +373,13 @@ if (typeof Intl === "undefined") {
   class Collator {
     #opts;
     constructor(_locales, options = {}) {
-      this.#opts = options;
+      this.#opts = { sensitivity: "variant", numeric: false, caseFirst: "false", ...options };
     }
     compare = (a, b) => {
-      let x = String(a);
-      let y = String(b);
-      if (this.#opts.sensitivity === "base" || this.#opts.sensitivity === "accent") {
-        x = x.toLowerCase();
-        y = y.toLowerCase();
-      }
-      if (this.#opts.numeric) {
-        const re = /(\d+)|(\D+)/g;
-        const xa = x.match(re) ?? [];
-        const ya = y.match(re) ?? [];
-        for (let i = 0; i < Math.min(xa.length, ya.length); i++) {
-          const xn = /^\d/.test(xa[i]);
-          const yn = /^\d/.test(ya[i]);
-          if (xn && yn) {
-            const d = Number(xa[i]) - Number(ya[i]);
-            if (d) return d < 0 ? -1 : 1;
-          } else if (xa[i] !== ya[i]) return xa[i].localeCompare(ya[i]);
-        }
-        return xa.length - ya.length;
-      }
-      return x.localeCompare(y);
+      return ops.intlCollationCompare(
+        String(a), String(b), this.#opts.sensitivity,
+        Boolean(this.#opts.numeric), this.#opts.caseFirst,
+      );
     };
     resolvedOptions() {
       return { locale: "en-US", ...this.#opts };

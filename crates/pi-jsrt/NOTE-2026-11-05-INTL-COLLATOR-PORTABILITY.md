@@ -199,3 +199,204 @@ prefix. Investigate ICU4X's numeric-primary weights and this split boundary;
 do not change it until the full corpus replay confirms improvement.
 Governing principles: architecture 3, 13, 24, 30, 35, 37; formal-methods 2,
 8, 12. The probe is diagnostic only; no runtime candidate is accepted.
+
+## Next implementation candidate
+
+Port the already replayed general comparator from the preserved Anvil probe
+into the platform-neutral `pi-jsrt` host op: compare ASCII digit runs as
+unbounded integers with a deterministic length tie-break, retain UTF-16
+common-prefix context for ICU4X fallback, and use Unicode General_Category
+Nd data rather than fixture-specific code points for the supplementary-digit
+boundary rule. Keep all `Intl.Collator` sensitivity, caseFirst, and numeric
+options intact. First require the unchanged 59,902-pair Maw law to improve
+from the current direct-ICU4X result without reducing fixture coverage, then
+address every remaining row with a categorical rule and rerun that same full
+law on Linux before requesting native Windows acceptance. This is one
+portable host implementation used by the same QuickJS runtime on Linux,
+Windows, and macOS; it is not a Windows-specific substitute. This plan is
+governed by architecture principles 3, 13, 24, 30, 33, 35, and 37, and formal
+methods principles 2, 8, and 12.
+
+The first port compiled, but its full QuickJS/Linux Maw replay failed with
+348/59,902 mismatches, worse than direct ICU4X's 174. A controlled replay
+restored the probe's exact two astral-digit ranges while retaining unbounded
+ASCII-run comparison; the full corpus then returned to 12 mismatches. The
+generalization to all astral Nd characters caused the 336 additional failures;
+the unbounded numeric-run comparison did not change the observed residual
+count. The remaining rows are the same six inverse pairs previously isolated
+as math/segmented digits versus Greek omega or math-Nd comparisons. This
+candidate compiles on Linux but is not an acceptance candidate while those 12
+rows remain. Keep the full corpus gate and investigate a rule that explains
+all six pair classes without extending a fixture-specific code-point list.
+
+## Residual split-path isolation
+
+The 12 directed failures comprise four rows in math-Nd versus math-Nd pairs,
+where ICU76 UTF-8 and UTF-16 entry points also disagree, and eight rows in
+supplementary-Nd versus Greek capital omega pairs, where Node/Swift agree and
+ICU4X disagrees. The latter class enters the special split-at-digit-boundary
+path. Next disable only that split while retaining localized UTF-16 prefix
+context and replay all 59,902 pairs. This is a diagnostic variation, not an
+accepted behavior change. Governing architecture principles 3, 13, 24, 30,
+33, 35, 37 and formal-methods principles 2, 8, 12 apply.
+
+Disabling only the split path replayed to 174/59,902 mismatches, the same
+count as direct ICU4X. Therefore the split path is responsible for a large net
+improvement (162 fewer failures) and cannot be removed wholesale, even though
+it leaves eight omega-related residual rows. Restored the 12-mismatch
+experimental candidate in the working tree. This confirms the next fix must
+refine the boundary decision using a general collation/numeric-run signal,
+not remove the path or widen its Unicode-category predicate.
+
+## Native UTF-16 API differential
+
+The candidate scans UTF-16 but converts fallback suffixes to Rust `str` with
+`String::from_utf16_lossy` and calls ICU4X `Collator::compare`. ICU4X 2.1.1
+also exposes `Collator::compare_utf16`, which preserves the JS input domain
+and avoids lossy conversion. Test this API on the unchanged 59,902-pair gate
+before further tuning the split rule. This is a portable ICU4X API available
+on Linux, Windows, and macOS; architecture principles 3, 13, 24, 30, 33, 35,
+37 and formal-methods principles 2, 8, 12 govern the experiment.
+
+The native UTF-16 API preserves the JS domain but the first full replay still
+reports the same 12 pairs. An isolated ICU4X 2.4.0 direct `compare_utf16` probe
+reports 5,216/59,902 mismatches, versus 174 for direct ICU4X 2.1.1; do not
+upgrade to 2.4.0 for this fix.
+
+The JS shim's `resolvedOptions()` and locale support report `en-US`, while
+`CollatorPreferences::default()` currently selects root/`und` data. An isolated
+ICU4X 2.1.1 direct `compare_utf16` probe with `en-US` still gives 5,216 corpus
+mismatches, the same as ICU4X 2.4.0 root, so locale alone is not a repair. Set
+the candidate's explicit locale to match its web API contract and replay the
+full adapter gate; keep locale support pinned to `en-US` until broader locale
+selection is implemented.
+
+The unchanged full Maw replay using ICU4X 2.1.1 `compare_utf16` still fails
+the same 12/59,902 rows as the UTF-8 `compare` candidate. Thus the lossy
+UTF-16-to-String conversion was not causal for these residuals. An isolated
+candidate retains the useful split-path adapter and native UTF-16 suffix
+comparison, but remains unaccepted. Continue investigating ICU4X numeric
+collation behavior against the six inverse residual pairs.
+
+An isolated 2.1.1 differential over all 59,902 pairs found 374 cases entering
+the current astral-digit split branch. Comparing full input versus split
+suffix against Swift expected signs: full input was correct on 140, split on
+366, both on 132, neither on 0. Thus split alone helps 234 rows and harms
+eight. All eight full-only wins are supplementary Nd versus Greek capital
+omega; the four remaining pair rows are two Nd-versus-Nd pairs where both
+whole and split ICU4X signs are wrong. These counts account for the 12
+residual rows and show the failure mechanisms are distinct: boundary choice
+for Greek omega, and cross-script numeric-run ordering for Nd-versus-Nd.
+Next derive the choice from collation/numeric data instead of code-point
+ranges, then handle mixed-script numeric runs without enumerating characters.
+
+Unicode property enumeration shows the two legacy astral ranges are both
+`General_Category=Nd` and `Script=Common`. ICU4X property data also contains a
+third astral Common-script Nd range, U+1CCF0..U+1CCF9. Replace the two literal
+ranges with the semantic conjunction `astral && Nd && Script=Common`, then
+replay the full corpus. This tests a portable Unicode property boundary and
+will also reveal whether the third range occurs in the fixture corpus.
+
+The `astral && Nd && Script=Common` candidate compiles and leaves the corpus at
+12/59,902 mismatches, the same as the two literal ranges. The additional
+U+1CCF0..U+1CCF9 range does not alter the observed outcome. The four Nd-vs-Nd
+residual rows are missed because only ASCII/ASCII starts enter manual numeric
+run comparison. Next compare Unicode decimal runs by their ICU4X numeric
+collation value, deriving each scalar's digit value through the same collator
+instead of code-point arithmetic; retain a per-scalar cache and rerun the full
+law to catch unintended changes.
+
+The first generalized decimal-run implementation compiles but regresses the
+full law to 182 mismatches. Equal-value mixed-script runs were given an
+ASCII-style run-length tie-break, which conflicts with the frozen Swift signs
+for rows such as `02` versus fullwidth `２`. Refine the experiment: retain the
+existing length tie-break only when both runs are ASCII; for runs containing
+non-ASCII digits, use the derived numeric value only when the values differ,
+otherwise leave equality and subsequent context to ICU4X. Replay all pairs.
+
+That narrower tie-break replay returns 174 mismatches. The implementation
+still consumed equal non-ASCII digit runs before ICU4X fallback, changing the
+prefix context and suppressing the useful split behavior. Refine again: for
+equal non-ASCII runs, fall back from the existing localized prefix without
+advancing either cursor; manually return only when their derived numeric
+values differ. Preserve ASCII-run consumption and tie behavior.
+
+The second revision still reports 174: routing every ASCII/ASCII run through
+collator-derived digit-value extraction altered the existing prefix behavior.
+Keep the established ASCII-run path byte-for-byte. Add a narrow numeric
+correction only when both current scalars are non-ASCII Nd; compare their full
+contiguous Nd runs by values from ICU4X, return only for unequal numeric values,
+and otherwise fall through without consuming the run. This isolates the four
+Nd-vs-Nd residual rows without changing mixed ASCII/Unicode equal-run behavior.
+
+The narrowed candidate reports 114 mismatches. Inspection of the captured rows
+shows Unicode-run parsing also starts when the two current Nd scalars are
+identical, causing it to compare unequal-length runs beyond a shared digit
+prefix (for example Arabic 2 versus Arabic 2 followed by mathematical 1).
+Require the current raw UTF-16 units to differ before comparing Unicode run
+values; identical shared digits must stay in the prefix context. Replay the
+full corpus again.
+
+The scalar-unit guard reduces the result to 24 rows but still leaves the
+original twelve and adds six new inverse pairs. The diagnostic shows that the
+scan can land on the low surrogate of two differing supplementary scalars,
+where the current scalar decoder returns `None`; it also applies the new
+numeric correction to script-specific Nd runs. Make the comparison loop
+advance and inspect complete Unicode scalars, preserving the old localized
+boundary after shared supplementary scalars. Apply value comparison only when
+both distinct current scalars are non-ASCII `Nd` with `Script=Common`, then
+replay the same gate.
+
+## Mixed digit/non-digit boundary hypothesis
+
+The eight remaining corpus rows are four inverse pairs where one string
+continues a decimal run with an astral Common-script digit and the other ends
+that run at Greek capital omega. The current astral-digit split compares only
+the differing suffix and loses the numeric context accumulated in the
+preceding shared Nd prefix. Test a narrow correction at this boundary: when
+both preceding scalars are decimal digits and exactly one current scalar is a
+decimal digit, scan each entire contiguous Nd run and compare its digit values
+using ICU4X-derived values. Return only if the numeric values differ; retain
+the existing fallback for equal values and all other divergence types. This
+tests a numeric-token boundary rule rather than enumerating the omega fixture.
+The full 59,902-pair Maw gate is the falsifier. Architecture principles 3,
+13, 24, 27, 30, 33, 35, and 37 govern the implementation and evidence.
+
+The first implementation of this hypothesis returned the comparison of the
+entire surrounding Nd runs whenever only one current scalar was a digit. After
+building the changed `pi` executable (rather than reusing the previous binary)
+the full gate regressed from 8 to 170 mismatches, so the experiment was
+reverted. The failure shows unequal whole-number values do not determine
+Foundation's ordering for every digit/non-digit boundary; contextual collation
+must remain authoritative outside a narrower, evidence-backed case. The
+previous 8-row candidate is restored in source; rebuild it and replay the full
+gate before claiming the baseline is recovered.
+
+## Greek letter plus numeric continuation diagnosis
+
+A raw ICU4X `compare_utf16` replay of the eight omega witnesses shows that
+the full localized suffix has the Swift sign, while truncating at the astral
+digit boundary reverses it. A fixture-wide categorical scan of the split
+boundary cases found the eight split-only failures in one structural class:
+the non-digit side is a Greek uppercase letter immediately followed by an
+Nd scalar. That property cohort contains ten directed rows; full comparison
+is correct on all ten, and split comparison is correct on only the two rows
+where both methods agree. The other split boundaries still supply the net
+corpus improvement, so disabling the split generally is rejected.
+
+Test one semantic exception to the split rule: when the non-digit scalar is
+`Script=Greek`, `General_Category=Uppercase_Letter`, and the next scalar on
+that side is `Nd`, keep the full localized suffix comparison. This derives
+the condition from Unicode and token context rather than enumerating omega.
+Run the exact 59,902-pair gate; any regression falsifies the refinement.
+Governing principles remain architecture 3, 13, 24, 27, 30, 33, 35, and 37.
+
+The refinement passes the complete Maw gate using the rebuilt Pi executable:
+`MAW_JS_RUNTIME=/home/oumy/work/pi-rs/target/debug/pi
+MAW_JS_RUNTIME_ARG=__pi_jsrt_node__ cargo +1.97.0 test --offline --locked
+-p maw --test json_collation_web_laws`. Result: 59,902/59,902 Swift pair
+comparisons plus the generated Web JSON cases pass. The gate first failed at
+170 when an overly broad whole-number comparator was tried; that implementation
+was reverted before this refinement. This is Linux candidate evidence only.
+The source still needs publication, Anvil's pinned Windows build/test, and
+native OptiPlex1 acceptance before it can be selected for deployment.

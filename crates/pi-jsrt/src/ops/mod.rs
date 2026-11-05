@@ -11,6 +11,7 @@ use crate::engine::{self, define_ops, js_str, run_glue, state};
 
 pub(crate) mod child_process;
 pub(crate) mod cipher;
+pub(crate) mod collation;
 pub(crate) mod crypto;
 pub(crate) mod dgram;
 pub(crate) mod dns;
@@ -359,6 +360,7 @@ pub(crate) fn bootstrap(ctx: &mut Context) -> JsResult<()> {
     define_ops(ctx, &ops, engine::CORE_OPS)?;
     define_ops(ctx, &ops, crate::loader::LOADER_OPS)?;
     define_ops(ctx, &ops, encoding::OPS)?;
+    define_ops(ctx, &ops, collation::OPS)?;
     define_ops(ctx, &ops, crypto::WEB_OPS)?;
     define_ops(
         ctx,
