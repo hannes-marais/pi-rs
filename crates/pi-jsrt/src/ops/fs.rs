@@ -127,8 +127,9 @@ fn stat_data(m: &fs::Metadata) -> StatData {
     let permissions = if readonly { 0o444 } else { 0o666 };
     let birth = ticks_ms(m.creation_time());
     StatData {
-        dev: m.volume_serial_number().unwrap_or(0) as u64,
-        ino: m.file_index().unwrap_or(0),
+        // Stable std::fs::Metadata does not yet expose Windows volume/file IDs.
+        dev: 0,
+        ino: 0,
         mode: kind | permissions,
         nlink: m.number_of_links().unwrap_or(1) as u64,
         uid: 0,

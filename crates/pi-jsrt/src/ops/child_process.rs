@@ -188,6 +188,7 @@ fn apply_common(cmd: &mut std::process::Command, o: &SpawnOpts) {
 #[cfg(unix)]
 type ExtraStdio = (Vec<(i32, std::os::unix::net::UnixStream)>, Vec<std::os::unix::net::UnixStream>);
 
+#[cfg(unix)]
 fn extra_stdio(cmd: &mut std::process::Command, o: &SpawnOpts) -> std::io::Result<ExtraStdio> {
     use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
