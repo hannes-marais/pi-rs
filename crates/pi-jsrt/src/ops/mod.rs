@@ -24,6 +24,10 @@ pub(crate) mod keys;
 pub(crate) mod net;
 pub(crate) mod prime;
 pub(crate) mod process;
+#[cfg(unix)]
+pub(crate) mod signal;
+#[cfg(windows)]
+#[path = "signal_windows.rs"]
 pub(crate) mod signal;
 pub(crate) mod sqlite;
 pub(crate) mod tls;
