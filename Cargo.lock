@@ -763,6 +763,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "djs-core"
+version = "0.0.0"
+source = "git+https://github.com/earendil-works/djs.git?rev=23b4548c4dfe40c833ca271d0b008cd08acb2d01#23b4548c4dfe40c833ca271d0b008cd08acb2d01"
+dependencies = [
+ "libm",
+]
+
+[[package]]
+name = "djs-lzrc"
+version = "0.0.0"
+source = "git+https://github.com/earendil-works/djs.git?rev=23b4548c4dfe40c833ca271d0b008cd08acb2d01#23b4548c4dfe40c833ca271d0b008cd08acb2d01"
+
+[[package]]
+name = "djs-prelude"
+version = "0.0.0"
+source = "git+https://github.com/earendil-works/djs.git?rev=23b4548c4dfe40c833ca271d0b008cd08acb2d01#23b4548c4dfe40c833ca271d0b008cd08acb2d01"
+dependencies = [
+ "djs-core",
+ "djs-lzrc",
+]
+
+[[package]]
 name = "dragonbox_ecma"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3114,6 +3136,8 @@ dependencies = [
 name = "pi-codemode"
 version = "1.3.0"
 dependencies = [
+ "djs-core",
+ "djs-prelude",
  "futures",
  "indexmap",
  "jiff",
@@ -3125,7 +3149,6 @@ dependencies = [
  "oxc_span",
  "parking_lot",
  "pi-json",
- "pi-quickjs",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
