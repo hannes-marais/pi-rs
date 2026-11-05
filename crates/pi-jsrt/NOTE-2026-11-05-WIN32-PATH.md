@@ -51,3 +51,18 @@ unchanged POSIX URL output. The Windows drive assertions still require the
 next official full profile run on OptiPlex1. Operation
 `6f1eee23-0afb-4220-a7c5-e5ce8b089e2e` failed overall; no installation was
 applied.
+
+Updated: 2026-11-05. EMgine VPM vm-hbjr/vm-8x76 now tracks the next native
+OptiPlex1 failure from official Anvil operation
+`4cad97e7-2626-44c5-95af-43a007f74762`: the preserved
+`scientific_literals_execute_in_moot_and_the_complete_emitted_module` test
+imports generated JavaScript through a `data:text/javascript;base64,...` URL,
+which `Loader::resolve_spec` currently sends through package lookup and rejects.
+Implement ESM data URL resolution/loading in Pi's QuickJS loader, keep the test
+and its runtime path intact, and verify base64 plus percent-encoded source and
+malformed/unsupported MIME behavior in Pi runtime tests. Architecture principles
+3, 6, 13, 21, 24, 27 and 30 govern the runtime compatibility correction; ToQ is
+that equivalent JS module inputs should resolve consistently on every host,
+and ToT is to model data modules as loader-owned source rather than filesystem
+paths. Validate with focused native Pi tests, then the exact full official Anvil
+profile build on OptiPlex1. No cache cleanup or system Node is part of the fix.

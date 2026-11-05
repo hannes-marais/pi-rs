@@ -91,16 +91,36 @@ module.exports = { kind: "cjs:" + path.basename(__filename), named: again.n + 1 
 "#,
     );
     write(root, "dep2.cjs", "exports.n = 41;\n");
-    write(root, "esm.mjs", "export default 'esm'; export const extra = '!';\n");
+    write(
+        root,
+        "esm.mjs",
+        "export default 'esm'; export const extra = '!';\n",
+    );
     write(
         root,
         "node_modules/pkg-esm/package.json",
         r#"{ "name": "pkg-esm", "type": "module", "exports": { ".": { "types": "./x.d.ts", "import": "./esm/index.js", "require": "./cjs/index.cjs" }, "./sub": "./esm/sub.js" } }"#,
     );
-    write(root, "node_modules/pkg-esm/esm/index.js", "export default 'pkg-esm:import';\n");
-    write(root, "node_modules/pkg-esm/esm/sub.js", "export default 'pkg-esm:sub';\n");
-    write(root, "node_modules/pkg-esm/cjs/index.cjs", "module.exports = 'pkg-esm:require';\n");
-    write(root, "node_modules/pkg-cjs/package.json", r#"{ "name": "pkg-cjs", "main": "index.js" }"#);
+    write(
+        root,
+        "node_modules/pkg-esm/esm/index.js",
+        "export default 'pkg-esm:import';\n",
+    );
+    write(
+        root,
+        "node_modules/pkg-esm/esm/sub.js",
+        "export default 'pkg-esm:sub';\n",
+    );
+    write(
+        root,
+        "node_modules/pkg-esm/cjs/index.cjs",
+        "module.exports = 'pkg-esm:require';\n",
+    );
+    write(
+        root,
+        "node_modules/pkg-cjs/package.json",
+        r#"{ "name": "pkg-cjs", "main": "index.js" }"#,
+    );
     write(
         root,
         "node_modules/pkg-cjs/index.js",
@@ -111,15 +131,39 @@ exports.default = function () { return "pkg-cjs default"; };
 exports.helper = function () { return "helper:" + require("pkg-esm"); };
 "#,
     );
-    write(root, "dir/index.ts", "const v: string = 'dir-index'; export default v;\n");
-    write(root, "renamed.ts", "export const fromTs = 'ts via .js specifier';\n");
-    write(root, "types-only.ts", "export type Unused = { a: number }; export interface I {}; export default 'types-only';\n");
+    write(
+        root,
+        "dir/index.ts",
+        "const v: string = 'dir-index'; export default v;\n",
+    );
+    write(
+        root,
+        "renamed.ts",
+        "export const fromTs = 'ts via .js specifier';\n",
+    );
+    write(
+        root,
+        "types-only.ts",
+        "export type Unused = { a: number }; export interface I {}; export default 'types-only';\n",
+    );
     write(root, "real-thing.ts", "export const value = 'aliased';\n");
     write(root, "lazy.js", "export const lazyValue = 'lazy';\n");
     write(root, "modpkg/package.json", r#"{ "type": "module" }"#);
-    write(root, "modpkg/x.js", "export default typeof require === 'function' ? 'esm-with-require' : 'esm';\n");
-    write(root, "cycle-a.ts", "import { cycleB } from './cycle-b'; export const cycleA = 'a+' + cycleB(); \n");
-    write(root, "cycle-b.ts", "import { cycleA } from './cycle-a'; export function cycleB() { return 'b'; } export function late() { return cycleA; }\n");
+    write(
+        root,
+        "modpkg/x.js",
+        "export default typeof require === 'function' ? 'esm-with-require' : 'esm';\n",
+    );
+    write(
+        root,
+        "cycle-a.ts",
+        "import { cycleB } from './cycle-b'; export const cycleA = 'a+' + cycleB(); \n",
+    );
+    write(
+        root,
+        "cycle-b.ts",
+        "import { cycleA } from './cycle-a'; export function cycleB() { return 'b'; } export function late() { return cycleA; }\n",
+    );
 }
 
 fn options(root: &Path) -> RuntimeOptions {
@@ -129,7 +173,10 @@ fn options(root: &Path) -> RuntimeOptions {
         VirtualModule::Esm("export function tool(): string { return 'virtual tool'; }".into()),
     );
     let mut aliases = HashMap::new();
-    aliases.insert("@alias/thing".to_string(), root.join("real-thing.ts").display().to_string());
+    aliases.insert(
+        "@alias/thing".to_string(),
+        root.join("real-thing.ts").display().to_string(),
+    );
     RuntimeOptions {
         cwd: Some(root.to_path_buf()),
         virtual_modules,
@@ -170,9 +217,21 @@ async fn esm_graph_with_interop() {
 async fn module_identity_and_cache() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    write(root, "state.ts", "export const state = { n: 0 }; export function bump() { return ++state.n; }\n");
-    write(root, "a.ts", "import { bump } from './state'; export const a = bump();\n");
-    write(root, "b.ts", "import { bump } from './state.ts'; export const b = bump();\n");
+    write(
+        root,
+        "state.ts",
+        "export const state = { n: 0 }; export function bump() { return ++state.n; }\n",
+    );
+    write(
+        root,
+        "a.ts",
+        "import { bump } from './state'; export const a = bump();\n",
+    );
+    write(
+        root,
+        "b.ts",
+        "import { bump } from './state.ts'; export const b = bump();\n",
+    );
     write(root, "c.cjs", "module.exports = require('./state.ts');\n");
     let rt = JsRuntime::new(RuntimeOptions {
         cwd: Some(root.to_path_buf()),
@@ -188,19 +247,33 @@ async fn module_identity_and_cache() {
 
     // Re-import after clearing the cache re-evaluates the file.
     write(root, "a.ts", "export const a = 'changed';\n");
-    assert_eq!(rt.import("./a.ts").await.unwrap().get("a").await.unwrap(), json!(1));
+    assert_eq!(
+        rt.import("./a.ts").await.unwrap().get("a").await.unwrap(),
+        json!(1)
+    );
     rt.clear_module_cache().await.unwrap();
-    assert_eq!(rt.import("./a.ts").await.unwrap().get("a").await.unwrap(), json!("changed"));
+    assert_eq!(
+        rt.import("./a.ts").await.unwrap().get("a").await.unwrap(),
+        json!("changed")
+    );
 }
 
 #[tokio::test]
 async fn module_errors() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    write(root, "bad-import.ts", "import { x } from './nope';\nexport default x;\n");
+    write(
+        root,
+        "bad-import.ts",
+        "import { x } from './nope';\nexport default x;\n",
+    );
     write(root, "bad-syntax.ts", "export const = ;\n");
     write(root, "throws.ts", "\n\nthrow new Error('at load');\n");
-    write(root, "missing-export.mjs", "import { notThere } from './esm.mjs'; export default notThere;\n");
+    write(
+        root,
+        "missing-export.mjs",
+        "import { notThere } from './esm.mjs'; export default notThere;\n",
+    );
     write(root, "esm.mjs", "export const there = 1;\n");
     let rt = JsRuntime::new(RuntimeOptions {
         cwd: Some(root.to_path_buf()),
@@ -210,16 +283,31 @@ async fn module_errors() {
     let e = rt.import("./bad-import.ts").await.unwrap_err().to_string();
     assert!(e.contains("Cannot find module './nope'"), "{e}");
     let e = rt.import("./bad-syntax.ts").await.unwrap_err().to_string();
-    assert!(e.contains("SyntaxError") && e.contains("bad-syntax.ts:1:"), "{e}");
+    assert!(
+        e.contains("SyntaxError") && e.contains("bad-syntax.ts:1:"),
+        "{e}"
+    );
     let e = rt.import("./throws.ts").await.unwrap_err();
     let js = e.as_js().unwrap();
     assert_eq!(js.message, "at load");
-    assert!(js.stack.as_deref().unwrap_or("").contains("throws.ts:3:"), "{:?}", js.stack);
-    let e = rt.import("./missing-export.mjs").await.unwrap_err().to_string();
+    assert!(
+        js.stack.as_deref().unwrap_or("").contains("throws.ts:3:"),
+        "{:?}",
+        js.stack
+    );
+    let e = rt
+        .import("./missing-export.mjs")
+        .await
+        .unwrap_err()
+        .to_string();
     assert!(e.contains("notThere"), "{e}");
     let e = rt.import("left-pad").await.unwrap_err().to_string();
     assert!(e.contains("Cannot find module 'left-pad'"), "{e}");
-    let e = rt.eval("require('./nope-cjs')").await.unwrap_err().to_string();
+    let e = rt
+        .eval("require('./nope-cjs')")
+        .await
+        .unwrap_err()
+        .to_string();
     assert!(e.contains("Cannot find module './nope-cjs'"), "{e}");
 }
 
@@ -231,9 +319,18 @@ async fn virtual_module_kinds_and_runtime_registration() {
         ..Default::default()
     })
     .unwrap();
-    rt.set_virtual_module("v-json", VirtualModule::Json(json!({ "a": 1, "b": [true] })));
-    rt.set_virtual_module("v-cjs", VirtualModule::CommonJs("exports.hello = (n) => 'hi ' + n;".into()));
-    rt.set_virtual_module("v-expr", VirtualModule::Expr("{ Type: { String: () => ({ type: 'string' }) }, version: 3 }".into()));
+    rt.set_virtual_module(
+        "v-json",
+        VirtualModule::Json(json!({ "a": 1, "b": [true] })),
+    );
+    rt.set_virtual_module(
+        "v-cjs",
+        VirtualModule::CommonJs("exports.hello = (n) => 'hi ' + n;".into()),
+    );
+    rt.set_virtual_module(
+        "v-expr",
+        VirtualModule::Expr("{ Type: { String: () => ({ type: 'string' }) }, version: 3 }".into()),
+    );
     rt.set_alias("@sinclair/typebox", "v-expr");
     rt.set_virtual_module(
         "v-esm",
@@ -261,6 +358,42 @@ async fn virtual_module_kinds_and_runtime_registration() {
     assert_eq!(v["esmDefault"], json!("esm-default"));
     assert_eq!(v["reqV"], json!(6));
     assert_eq!(v["reqDefault"], json!("esm-default"));
+}
+
+#[tokio::test]
+async fn data_url_javascript_modules_load_as_esm() {
+    use base64::Engine as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let rt = JsRuntime::new(RuntimeOptions {
+        cwd: Some(dir.path().to_path_buf()),
+        ..Default::default()
+    })
+    .unwrap();
+    let encoded = base64::engine::general_purpose::STANDARD.encode("export const value = 42;");
+    let ns = rt
+        .eval_module(
+            format!(
+                r#"
+                const encoded = await import("data:text/javascript;base64,{encoded}");
+                const escaped = await import("data:text/javascript,export%20const%20value%20%3D%2042%3B");
+                export default {{ encoded: encoded.value, escaped: escaped.value }};
+                "#
+            ),
+            "data-url-test.mjs",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        ns.get("default").await.unwrap(),
+        json!({ "encoded": 42, "escaped": 42 })
+    );
+    let err = rt
+        .eval(r#"import("data:text/plain,export%20default%201")"#)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("Cannot find module"), "{err}");
 }
 
 /// Real npm packages installed in `PI_JSRT_NPM_DIR` (skipped when unset), e.g. after

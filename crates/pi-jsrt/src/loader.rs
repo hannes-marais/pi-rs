@@ -5,7 +5,7 @@
 //! 1. embedder aliases (exact, or `alias/` prefix),
 //! 2. embedder virtual modules (exact),
 //! 3. builtins (`node:fs`, `fs`, `jsrt:host`, ...),
-//! 4. `file:` URLs, absolute and relative paths (with extension / index probing,
+//! 4. `data:` ES modules, `file:` URLs, absolute and relative paths (with extension / index probing,
 //!    including `./x.js` -> `./x.ts` like TypeScript's resolver),
 //! 5. packages in `node_modules` (walking up), honoring `package.json` `exports`
 //!    (with `import`/`require`/`node`/`default` conditions and `*` patterns),
@@ -26,7 +26,8 @@ use std::sync::Arc;
 
 use crate::js::rquickjs::qjs;
 use crate::js::{
-    Context, Engine, JsArgs, JsArray, JsError, JsNativeError, JsObject, JsPromise, JsResult, JsString, JsValue, PromiseState, Source, js_string,
+    Context, Engine, JsArgs, JsArray, JsError, JsNativeError, JsObject, JsPromise, JsResult,
+    JsString, JsValue, PromiseState, Source, js_string,
 };
 use serde_json::Value;
 
@@ -40,6 +41,7 @@ pub(crate) enum Resolved {
     Builtin(String),
     Virtual(String),
     File(PathBuf),
+    Data { url: String, source: String },
 }
 
 impl Resolved {
@@ -51,6 +53,7 @@ impl Resolved {
             Resolved::Virtual(s) => format!("virtual:{s}"),
             Resolved::File(p) if generation == 0 => p.display().to_string(),
             Resolved::File(p) => format!("{}{RELOAD_MARK}{generation}", p.display()),
+            Resolved::Data { url, .. } => url.clone(),
         }
     }
 }
@@ -61,7 +64,11 @@ const EVAL_MARK: &str = "?eval=";
 
 /// The file path behind a module name (without the reload / eval suffix).
 pub(crate) fn module_path(name: &str) -> &str {
-    let end = [RELOAD_MARK, EVAL_MARK].iter().filter_map(|m| name.find(m)).min().unwrap_or(name.len());
+    let end = [RELOAD_MARK, EVAL_MARK]
+        .iter()
+        .filter_map(|m| name.find(m))
+        .min()
+        .unwrap_or(name.len());
     &name[..end]
 }
 
@@ -140,14 +147,21 @@ impl Loader {
     /// The module name for `resolved`, registered for the QuickJS loader callback.
     fn module_name(&self, resolved: &Resolved) -> String {
         let name = self.key(resolved);
-        self.names.borrow_mut().entry(name.clone()).or_insert_with(|| resolved.clone());
+        self.names
+            .borrow_mut()
+            .entry(name.clone())
+            .or_insert_with(|| resolved.clone());
         name
     }
 
     /// jiti-style `__filename`/`__dirname`/`require` for ES modules, unless disabled
     /// ([`crate::RuntimeOptions::esm_cjs_globals`]).
     fn cjs_globals(&self, code: &str, declared: &[&str]) -> String {
-        if self.shared.options.esm_cjs_globals { inject_cjs_globals(code, declared) } else { code.to_string() }
+        if self.shared.options.esm_cjs_globals {
+            inject_cjs_globals(code, declared)
+        } else {
+            code.to_string()
+        }
     }
 
     pub(crate) fn clear(&self) {
@@ -160,8 +174,12 @@ impl Loader {
     /// (a new generation), which re-reads and re-evaluates the files.
     fn clear_files(&self) {
         self.generation.set(self.generation.get() + 1);
-        self.cjs.borrow_mut().retain(|k, _| k.starts_with("builtin:") || k.starts_with("virtual:"));
-        self.values.borrow_mut().retain(|k, _| k.starts_with("builtin:") || k.starts_with("virtual:"));
+        self.cjs
+            .borrow_mut()
+            .retain(|k, _| k.starts_with("builtin:") || k.starts_with("virtual:"));
+        self.values
+            .borrow_mut()
+            .retain(|k, _| k.starts_with("builtin:") || k.starts_with("virtual:"));
         self.pkg_json.borrow_mut().clear();
     }
 
@@ -198,11 +216,22 @@ impl Loader {
         current
     }
 
-    pub(crate) fn resolve(&self, ctx: &mut Context, spec: &str, base_dir: &Path, kind: Kind) -> Result<Resolved, Error> {
+    pub(crate) fn resolve(
+        &self,
+        ctx: &mut Context,
+        spec: &str,
+        base_dir: &Path,
+        kind: Kind,
+    ) -> Result<Resolved, Error> {
         let resolved = self.resolve_spec(ctx, spec, base_dir, kind)?;
         // An alias keyed by an absolute file path redirects every import resolving to that file.
         if let Resolved::File(path) = &resolved {
-            let target = self.shared.aliases.read().get(&*path.to_string_lossy()).cloned();
+            let target = self
+                .shared
+                .aliases
+                .read()
+                .get(&*path.to_string_lossy())
+                .cloned();
             if let Some(target) = target {
                 return self.resolve_spec(ctx, &target, base_dir, kind);
             }
@@ -210,7 +239,13 @@ impl Loader {
         Ok(resolved)
     }
 
-    fn resolve_spec(&self, ctx: &mut Context, spec: &str, base_dir: &Path, kind: Kind) -> Result<Resolved, Error> {
+    fn resolve_spec(
+        &self,
+        ctx: &mut Context,
+        spec: &str,
+        base_dir: &Path,
+        kind: Kind,
+    ) -> Result<Resolved, Error> {
         let spec = self.apply_alias(spec);
         if self.shared.virtual_modules.read().contains_key(&spec) {
             return Ok(Resolved::Virtual(spec));
@@ -222,12 +257,19 @@ impl Loader {
             specifier: spec.clone(),
             referrer: base_dir.display().to_string(),
         };
+        if spec.starts_with("data:") {
+            let source = decode_data_module(&spec).ok_or_else(not_found)?;
+            return Ok(Resolved::Data { url: spec, source });
+        }
         if let Some(rest) = spec.strip_prefix("file://") {
             let path = url::Url::parse(&format!("file://{rest}"))
                 .ok()
                 .and_then(|u| u.to_file_path().ok())
                 .unwrap_or_else(|| PathBuf::from(rest));
-            return self.resolve_path(&path, kind).map(Resolved::File).ok_or_else(not_found);
+            return self
+                .resolve_path(&path, kind)
+                .map(Resolved::File)
+                .ok_or_else(not_found);
         }
         if is_absolute_file_specifier(&spec) {
             return self
@@ -237,12 +279,20 @@ impl Loader {
         }
         if spec == "." || spec == ".." || spec.starts_with("./") || spec.starts_with("../") {
             let p = normalize(&base_dir.join(&spec));
-            return self.resolve_path(&p, kind).map(Resolved::File).ok_or_else(not_found);
+            return self
+                .resolve_path(&p, kind)
+                .map(Resolved::File)
+                .ok_or_else(not_found);
         }
         if spec.starts_with('#') {
-            return self.resolve_imports(&spec, base_dir, kind).map(Resolved::File).ok_or_else(not_found);
+            return self
+                .resolve_imports(&spec, base_dir, kind)
+                .map(Resolved::File)
+                .ok_or_else(not_found);
         }
-        self.resolve_package(&spec, base_dir, kind).map(Resolved::File).ok_or_else(not_found)
+        self.resolve_package(&spec, base_dir, kind)
+            .map(Resolved::File)
+            .ok_or_else(not_found)
     }
 
     /// package.json `imports` (`#internal` specifiers) of the nearest package.
@@ -345,7 +395,9 @@ impl Loader {
             .ok()
             .and_then(|s| serde_json::from_str::<Value>(&s).ok())
             .map(Rc::new);
-        self.pkg_json.borrow_mut().insert(dir.to_path_buf(), v.clone());
+        self.pkg_json
+            .borrow_mut()
+            .insert(dir.to_path_buf(), v.clone());
         v
     }
 
@@ -391,7 +443,11 @@ impl Loader {
                 Kind::Import => &["import", "module", "node", "default"],
                 Kind::Require => &["require", "node", "default"],
             };
-            let sub = if subpath.is_empty() { ".".to_string() } else { format!("./{subpath}") };
+            let sub = if subpath.is_empty() {
+                ".".to_string()
+            } else {
+                format!("./{subpath}")
+            };
             if let Some(target) = resolve_exports(exports, &sub, conditions) {
                 let p = normalize(&pkg_dir.join(target));
                 if p.is_file() {
@@ -418,7 +474,8 @@ impl Loader {
         let source = self.shared.file_sources.read().get(path).cloned();
         let text = match source {
             Some(text) => text,
-            None => std::fs::read_to_string(path).map_err(|e| Error::host(format!("cannot read {}: {e}", path.display())))?,
+            None => std::fs::read_to_string(path)
+                .map_err(|e| Error::host(format!("cannot read {}: {e}", path.display())))?,
         };
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let in_node_modules = path.components().any(|c| c.as_os_str() == "node_modules");
@@ -438,7 +495,10 @@ impl Loader {
             "ts" | "mts" | "cts" | "tsx" => {
                 let out = transpile::transpile(&text, path, SourceLang::from_path(path))?;
                 if let Some(map) = out.source_map {
-                    state(ctx).source_maps.borrow_mut().insert(path.display().to_string(), map);
+                    state(ctx)
+                        .source_maps
+                        .borrow_mut()
+                        .insert(path.display().to_string(), map);
                 }
                 let format = match ext {
                     "mts" => Format::Esm,
@@ -483,7 +543,10 @@ impl Loader {
             } else {
                 self.cjs_globals(&text, &out.declared_cjs_names)
             };
-            Ok(Prepared { code, format: Format::Esm })
+            Ok(Prepared {
+                code,
+                format: Format::Esm,
+            })
         } else {
             Ok(Prepared {
                 code: text,
@@ -493,21 +556,31 @@ impl Loader {
     }
 
     /// Create the QuickJS module named `name` (called by QuickJS's loader hook).
-    fn load_module(self: &Rc<Self>, ctx: &mut Context, name: &str) -> Result<*mut qjs::JSModuleDef, Error> {
+    fn load_module(
+        self: &Rc<Self>,
+        ctx: &mut Context,
+        name: &str,
+    ) -> Result<*mut qjs::JSModuleDef, Error> {
         tracing::trace!(target: "pi_jsrt", "load module {name}");
         let source = self.sources.borrow_mut().remove(name);
         if let Some(code) = source {
             return compile_module(ctx, &code, name);
         }
-        let resolved = self.names.borrow().get(name).cloned().ok_or_else(|| Error::ModuleNotFound {
-            specifier: name.to_string(),
-            referrer: "<loader>".into(),
-        })?;
+        let resolved =
+            self.names
+                .borrow()
+                .get(name)
+                .cloned()
+                .ok_or_else(|| Error::ModuleNotFound {
+                    specifier: name.to_string(),
+                    referrer: "<loader>".into(),
+                })?;
         let key = name.to_string();
         let module = match &resolved {
             Resolved::Builtin(builtin) => {
                 let value = require_builtin(ctx, builtin).map_err(|e| error::from_js(e, ctx))?;
-                self.synthetic_from_value(ctx, value, name, false).map_err(|e| error::from_js(e, ctx))?
+                self.synthetic_from_value(ctx, value, name, false)
+                    .map_err(|e| error::from_js(e, ctx))?
             }
             Resolved::Virtual(spec) => {
                 let vm = self.shared.virtual_modules.read().get(spec).cloned();
@@ -517,35 +590,50 @@ impl Loader {
                 })?;
                 match vm {
                     VirtualModule::Esm(src) => {
-                        let out = transpile::transpile(&src, Path::new(&format!("{spec}.ts")), SourceLang::TypeScript)?;
+                        let out = transpile::transpile(
+                            &src,
+                            Path::new(&format!("{spec}.ts")),
+                            SourceLang::TypeScript,
+                        )?;
                         if let Some(map) = out.source_map {
-                            state(ctx).source_maps.borrow_mut().insert(name.to_string(), map);
+                            state(ctx)
+                                .source_maps
+                                .borrow_mut()
+                                .insert(name.to_string(), map);
                         }
                         compile_module(ctx, &out.code, name)?
                     }
                     VirtualModule::EsmJs(src) => compile_module(ctx, &src, name)?,
                     _ => {
-                        let value = self.require_resolved(ctx, &resolved).map_err(|e| error::from_js(e, ctx))?;
-                        self.synthetic_from_value(ctx, value, name, true).map_err(|e| error::from_js(e, ctx))?
+                        let value = self
+                            .require_resolved(ctx, &resolved)
+                            .map_err(|e| error::from_js(e, ctx))?;
+                        self.synthetic_from_value(ctx, value, name, true)
+                            .map_err(|e| error::from_js(e, ctx))?
                     }
                 }
             }
             Resolved::File(path) => {
                 let prepared = self.prepare_file(ctx, path)?;
                 match prepared.format {
-                    Format::Esm => compile_module(ctx, &prepared.code, name).map_err(|e| with_file(e, path))?,
+                    Format::Esm => {
+                        compile_module(ctx, &prepared.code, name).map_err(|e| with_file(e, path))?
+                    }
                     Format::Json => {
                         let v = parse_json_text(ctx, &prepared.code, path)?;
-                        self.synthetic_from_value(ctx, v, name, false).map_err(|e| error::from_js(e, ctx))?
+                        self.synthetic_from_value(ctx, v, name, false)
+                            .map_err(|e| error::from_js(e, ctx))?
                     }
                     Format::Cjs => {
                         let v = self
                             .run_cjs(ctx, &key, path, &prepared.code)
                             .map_err(|e| error::from_js(e, ctx))?;
-                        self.synthetic_from_value(ctx, v, name, true).map_err(|e| error::from_js(e, ctx))?
+                        self.synthetic_from_value(ctx, v, name, true)
+                            .map_err(|e| error::from_js(e, ctx))?
                     }
                 }
             }
+            Resolved::Data { source, .. } => compile_module(ctx, source, name)?,
         };
         Ok(module)
     }
@@ -553,13 +641,20 @@ impl Loader {
     /// A module exposing `value` as `default` and its own enumerable properties as named
     /// exports. With `cjs_interop`, `__esModule` objects use their `default` property as the
     /// default export.
-    fn synthetic_from_value(&self, ctx: &mut Context, value: JsValue, name: &str, cjs_interop: bool) -> JsResult<*mut qjs::JSModuleDef> {
+    fn synthetic_from_value(
+        &self,
+        ctx: &mut Context,
+        value: JsValue,
+        name: &str,
+        cjs_interop: bool,
+    ) -> JsResult<*mut qjs::JSModuleDef> {
         let mut names = vec!["default".to_string()];
         let mut default = value.clone();
         if let Some(obj) = value.as_object() {
             // Like Node's CJS export detection, element indices of arrays and typed arrays (a
             // module exporting a 50 KB Buffer) are not named exports.
-            let indexed = obj.is_array() || crate::js::JsTypedArray::from_object(obj.clone()).is_ok();
+            let indexed =
+                obj.is_array() || crate::js::JsTypedArray::from_object(obj.clone()).is_ok();
             for k in object_keys(ctx, &obj)? {
                 let k = k.to_std_string_lossy();
                 if k == "default" || k.contains('\0') {
@@ -570,7 +665,10 @@ impl Loader {
                 }
                 names.push(k);
             }
-            if cjs_interop && obj.get(js_string!("__esModule"), ctx)?.to_boolean() && obj.has_property(js_string!("default"), ctx)? {
+            if cjs_interop
+                && obj.get(js_string!("__esModule"), ctx)?.to_boolean()
+                && obj.has_property(js_string!("default"), ctx)?
+            {
                 default = obj.get(js_string!("default"), ctx)?;
             }
         }
@@ -586,12 +684,23 @@ impl Loader {
                 return Err(crate::js::take_exception(&Context::from_raw(raw)));
             }
         }
-        self.synthetic.borrow_mut().insert(name.to_string(), Synthetic { value, default, names });
+        self.synthetic.borrow_mut().insert(
+            name.to_string(),
+            Synthetic {
+                value,
+                default,
+                names,
+            },
+        );
         Ok(m)
     }
 
     /// `require()` a resolved target.
-    fn require_resolved(self: &Rc<Self>, ctx: &mut Context, resolved: &Resolved) -> JsResult<JsValue> {
+    fn require_resolved(
+        self: &Rc<Self>,
+        ctx: &mut Context,
+        resolved: &Resolved,
+    ) -> JsResult<JsValue> {
         let key = self.key(resolved);
         if let Some(m) = self.cjs.borrow().get(&key).cloned() {
             return m.get(js_string!("exports"), ctx);
@@ -604,10 +713,14 @@ impl Loader {
             Resolved::Virtual(spec) => {
                 let vm = self.shared.virtual_modules.read().get(spec).cloned();
                 let Some(vm) = vm else {
-                    return Err(JsNativeError::error().with_message(format!("Cannot find module '{spec}'")).into());
+                    return Err(JsNativeError::error()
+                        .with_message(format!("Cannot find module '{spec}'"))
+                        .into());
                 };
                 match vm {
-                    VirtualModule::Esm(_) | VirtualModule::EsmJs(_) => self.require_esm(ctx, resolved),
+                    VirtualModule::Esm(_) | VirtualModule::EsmJs(_) => {
+                        self.require_esm(ctx, resolved)
+                    }
                     VirtualModule::CommonJs(src) => {
                         let path = PathBuf::from(format!("virtual:{spec}"));
                         self.run_cjs(ctx, &key, &path, &src)
@@ -625,25 +738,35 @@ impl Loader {
                         Ok(v)
                     }
                     VirtualModule::Object(handle) => {
-                        let v = state(ctx)
-                            .get_handle(handle.id())
-                            .ok_or_else(|| engine::type_error(format!("virtual module '{spec}' refers to a released handle")))?;
+                        let v = state(ctx).get_handle(handle.id()).ok_or_else(|| {
+                            engine::type_error(format!(
+                                "virtual module '{spec}' refers to a released handle"
+                            ))
+                        })?;
                         self.values.borrow_mut().insert(key, v.clone());
                         Ok(v)
                     }
                 }
             }
             Resolved::File(path) => {
-                let prepared = self.prepare_file(ctx, path).map_err(|e| error::to_js(&e, ctx))?;
+                let prepared = self
+                    .prepare_file(ctx, path)
+                    .map_err(|e| error::to_js(&e, ctx))?;
                 match prepared.format {
                     Format::Json => {
-                        let v = parse_json_text(ctx, &prepared.code, path).map_err(|e| error::to_js(&e, ctx))?;
+                        let v = parse_json_text(ctx, &prepared.code, path)
+                            .map_err(|e| error::to_js(&e, ctx))?;
                         self.values.borrow_mut().insert(key, v.clone());
                         Ok(v)
                     }
                     Format::Cjs => self.run_cjs(ctx, &key, path, &prepared.code),
                     Format::Esm => self.require_esm(ctx, resolved),
                 }
+            }
+            Resolved::Data { url, .. } => {
+                return Err(JsNativeError::error()
+                    .with_message(format!("Cannot require ES module '{url}'"))
+                    .into());
             }
         }
     }
@@ -669,7 +792,13 @@ impl Loader {
         }
     }
 
-    fn run_cjs(self: &Rc<Self>, ctx: &mut Context, key: &str, path: &Path, code: &str) -> JsResult<JsValue> {
+    fn run_cjs(
+        self: &Rc<Self>,
+        ctx: &mut Context,
+        key: &str,
+        path: &Path,
+        code: &str,
+    ) -> JsResult<JsValue> {
         let filename = path.display().to_string();
         let create = internal(ctx).get(js_string!("createCjsModule"), ctx)?;
         let create = create
@@ -679,17 +808,31 @@ impl Loader {
             .call(&JsValue::undefined(), &[js_str(&filename)], ctx)?
             .as_object()
             .ok_or_else(|| engine::type_error("createCjsModule returned a non-object"))?;
-        self.cjs.borrow_mut().insert(key.to_string(), module_obj.clone());
-        let wrapped = format!("(function (exports, require, module, __filename, __dirname) {{{code}\n}})");
+        self.cjs
+            .borrow_mut()
+            .insert(key.to_string(), module_obj.clone());
+        let wrapped =
+            format!("(function (exports, require, module, __filename, __dirname) {{{code}\n}})");
         let result = (|| {
             let f = ctx.eval(Source::from_bytes(wrapped.as_bytes()).with_path(path))?;
-            let f = f.as_function().ok_or_else(|| engine::type_error("CommonJS wrapper is not a function"))?;
+            let f = f
+                .as_function()
+                .ok_or_else(|| engine::type_error("CommonJS wrapper is not a function"))?;
             let exports = module_obj.get(js_string!("exports"), ctx)?;
             let require = module_obj.get(js_string!("require"), ctx)?;
-            let dirname = path.parent().map(|p| p.display().to_string()).unwrap_or_default();
+            let dirname = path
+                .parent()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
             f.call(
                 &exports,
-                &[exports.clone(), require, module_obj.clone().into(), js_str(&filename), js_str(&dirname)],
+                &[
+                    exports.clone(),
+                    require,
+                    module_obj.clone().into(),
+                    js_str(&filename),
+                    js_str(&dirname),
+                ],
                 ctx,
             )?;
             module_obj.set(js_string!("loaded"), true, false, ctx)?;
@@ -702,7 +845,9 @@ impl Loader {
     }
 }
 
-const EXTENSIONS: &[&str] = &[".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".cjs", ".json"];
+const EXTENSIONS: &[&str] = &[
+    ".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".cjs", ".json",
+];
 
 fn strip_shebang(text: String) -> String {
     match text.strip_prefix("#!") {
@@ -753,12 +898,22 @@ fn split_package(spec: &str) -> Option<(&str, &str)> {
 }
 
 /// Resolve a package.json `exports` entry for `subpath` ("." or "./x").
-pub(crate) fn resolve_exports(exports: &Value, subpath: &str, conditions: &[&str]) -> Option<String> {
-    let is_subpath_map = exports
-        .as_object()
-        .is_some_and(|m| m.keys().next().is_some_and(|k| k.starts_with('.') || k.starts_with('#')));
+pub(crate) fn resolve_exports(
+    exports: &Value,
+    subpath: &str,
+    conditions: &[&str],
+) -> Option<String> {
+    let is_subpath_map = exports.as_object().is_some_and(|m| {
+        m.keys()
+            .next()
+            .is_some_and(|k| k.starts_with('.') || k.starts_with('#'))
+    });
     if !is_subpath_map {
-        return if subpath == "." { resolve_target(exports, None, conditions) } else { None };
+        return if subpath == "." {
+            resolve_target(exports, None, conditions)
+        } else {
+            None
+        };
     }
     let map = exports.as_object()?;
     if let Some(t) = map.get(subpath) {
@@ -769,7 +924,10 @@ pub(crate) fn resolve_exports(exports: &Value, subpath: &str, conditions: &[&str
     for (key, target) in map {
         let Some(star) = key.find('*') else { continue };
         let (prefix, suffix) = (&key[..star], &key[star + 1..]);
-        if subpath.len() >= prefix.len() + suffix.len() && subpath.starts_with(prefix) && subpath.ends_with(suffix) {
+        if subpath.len() >= prefix.len() + suffix.len()
+            && subpath.starts_with(prefix)
+            && subpath.ends_with(suffix)
+        {
             let matched = &subpath[prefix.len()..subpath.len() - suffix.len()];
             if best.as_ref().is_none_or(|(k, _, _)| key.len() > k.len()) {
                 best = Some((key, target, matched.to_string()));
@@ -786,7 +944,9 @@ fn resolve_target(target: &Value, matched: Option<&str>, conditions: &[&str]) ->
             Some(m) => s.replace('*', m),
             None => s.clone(),
         }),
-        Value::Array(items) => items.iter().find_map(|t| resolve_target(t, matched, conditions)),
+        Value::Array(items) => items
+            .iter()
+            .find_map(|t| resolve_target(t, matched, conditions)),
         Value::Object(map) => {
             for (cond, t) in map {
                 if (cond == "default" || conditions.contains(&cond.as_str()))
@@ -825,29 +985,41 @@ fn builtin_name(ctx: &mut Context, spec: &str) -> Option<String> {
         None if PREFIX_ONLY_BUILTINS.contains(&spec) => return None,
         None => spec,
     };
-    let has = internal(ctx).get(js_string!("hasBuiltin"), ctx).ok()?.as_function()?;
+    let has = internal(ctx)
+        .get(js_string!("hasBuiltin"), ctx)
+        .ok()?
+        .as_function()?;
     let r = has.call(&JsValue::undefined(), &[js_str(name)], ctx).ok()?;
-    if r.to_boolean() { Some(name.to_string()) } else { None }
+    if r.to_boolean() {
+        Some(name.to_string())
+    } else {
+        None
+    }
 }
 
 fn require_builtin(ctx: &mut Context, name: &str) -> JsResult<JsValue> {
     let f = internal(ctx).get(js_string!("requireBuiltin"), ctx)?;
-    let f = f.as_function().ok_or_else(|| engine::type_error("requireBuiltin missing"))?;
+    let f = f
+        .as_function()
+        .ok_or_else(|| engine::type_error("requireBuiltin missing"))?;
     f.call(&JsValue::undefined(), &[js_str(name)], ctx)
 }
 
 fn parse_json_text(ctx: &mut Context, text: &str, path: &Path) -> Result<JsValue, Error> {
-    let v: Value = serde_json::from_str(text.trim_start_matches('\u{feff}')).map_err(|e| Error::Syntax {
-        file: path.display().to_string(),
-        message: format!("{}: {e}", path.display()),
-    })?;
+    let v: Value =
+        serde_json::from_str(text.trim_start_matches('\u{feff}')).map_err(|e| Error::Syntax {
+            file: path.display().to_string(),
+            message: format!("{}: {e}", path.display()),
+        })?;
     JsValue::from_json(&v, ctx).map_err(|e| error::from_js(e, ctx))
 }
 
 fn object_keys(ctx: &mut Context, obj: &JsObject) -> JsResult<Vec<JsString>> {
     let object_ctor = ctx.intrinsics().constructors().object().constructor();
     let keys = object_ctor.get(js_string!("keys"), ctx)?;
-    let keys = keys.as_function().ok_or_else(|| engine::type_error("Object.keys missing"))?;
+    let keys = keys
+        .as_function()
+        .ok_or_else(|| engine::type_error("Object.keys missing"))?;
     let arr = keys.call(&JsValue::undefined(), &[obj.clone().into()], ctx)?;
     let arr = JsArray::from_object(arr.as_object().ok_or_else(|| engine::type_error("keys"))?)?;
     let len = arr.length(ctx)?;
@@ -861,7 +1033,9 @@ fn object_keys(ctx: &mut Context, obj: &JsObject) -> JsResult<Vec<JsString>> {
 /// Name the file in parse errors.
 fn with_file(err: Error, path: &Path) -> Error {
     match err {
-        Error::Js(mut e) if e.name == "SyntaxError" && !e.message.contains(&*path.to_string_lossy()) => {
+        Error::Js(mut e)
+            if e.name == "SyntaxError" && !e.message.contains(&*path.to_string_lossy()) =>
+        {
             e.message = format!("{} ({})", e.message, path.display());
             Error::Js(e)
         }
@@ -871,7 +1045,10 @@ fn with_file(err: Error, path: &Path) -> Error {
 
 fn referrer_dir(ctx: &Context, path: Option<&Path>) -> PathBuf {
     match path {
-        Some(p) if p.is_absolute() => p.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("/")),
+        Some(p) if p.is_absolute() => p
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("/")),
         _ => state(ctx).cwd.borrow().clone(),
     }
 }
@@ -884,23 +1061,40 @@ fn base_dir_of(ctx: &Context, name: &str) -> PathBuf {
 }
 
 fn loader(ctx: &Context) -> Rc<Loader> {
-    ctx.get_data::<Rc<Loader>>().cloned().expect("pi-jsrt loader not installed")
+    ctx.get_data::<Rc<Loader>>()
+        .cloned()
+        .expect("pi-jsrt loader not installed")
 }
 
 /// Install the loader in the engine (QuickJS module hooks).
 pub(crate) fn install(engine: &Engine, loader: Rc<Loader>) {
     engine.context().insert_data(loader);
     unsafe {
-        qjs::JS_SetModuleLoaderFunc2(engine.raw_runtime(), Some(normalize_hook), Some(loader_hook), Some(check_attributes_hook), std::ptr::null_mut());
+        qjs::JS_SetModuleLoaderFunc2(
+            engine.raw_runtime(),
+            Some(normalize_hook),
+            Some(loader_hook),
+            Some(check_attributes_hook),
+            std::ptr::null_mut(),
+        );
     }
 }
 
 fn cstr(p: *const c_char) -> String {
-    if p.is_null() { String::new() } else { unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned() }
+    if p.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
+    }
 }
 
 /// QuickJS `module_normalize`: resolve `name` imported by module `base` to a module name.
-unsafe extern "C" fn normalize_hook(raw: *mut qjs::JSContext, base: *const c_char, name: *const c_char, _opaque: *mut c_void) -> *mut c_char {
+unsafe extern "C" fn normalize_hook(
+    raw: *mut qjs::JSContext,
+    base: *const c_char,
+    name: *const c_char,
+    _opaque: *mut c_void,
+) -> *mut c_char {
     let base = cstr(base);
     let spec = cstr(name);
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -910,7 +1104,9 @@ unsafe extern "C" fn normalize_hook(raw: *mut qjs::JSContext, base: *const c_cha
             return Ok(spec.clone());
         }
         let dir = base_dir_of(&ctx, &base);
-        let resolved = l.resolve(&mut ctx, &spec, &dir, Kind::Import).map_err(|e| error::to_js(&e, &mut ctx))?;
+        let resolved = l
+            .resolve(&mut ctx, &spec, &dir, Kind::Import)
+            .map_err(|e| error::to_js(&e, &mut ctx))?;
         Ok::<_, JsError>(l.module_name(&resolved))
     }));
     match r {
@@ -923,20 +1119,29 @@ unsafe extern "C" fn normalize_hook(raw: *mut qjs::JSContext, base: *const c_cha
             std::ptr::null_mut()
         }
         Err(_) => {
-            crate::js::throw_error(&Context::from_raw(raw), engine::type_error(format!("panic while resolving '{spec}'")));
+            crate::js::throw_error(
+                &Context::from_raw(raw),
+                engine::type_error(format!("panic while resolving '{spec}'")),
+            );
             std::ptr::null_mut()
         }
     }
 }
 
 /// QuickJS `module_loader`: create the module named `name`.
-unsafe extern "C" fn loader_hook(raw: *mut qjs::JSContext, name: *const c_char, _opaque: *mut c_void, _attributes: qjs::JSValue) -> *mut qjs::JSModuleDef {
+unsafe extern "C" fn loader_hook(
+    raw: *mut qjs::JSContext,
+    name: *const c_char,
+    _opaque: *mut c_void,
+    _attributes: qjs::JSValue,
+) -> *mut qjs::JSModuleDef {
     let name = cstr(name);
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut ctx = Context::from_raw(raw);
         let l = loader(&ctx);
         l.loaded.borrow_mut().insert(name.clone());
-        l.load_module(&mut ctx, &name).map_err(|e| error::to_js(&e, &mut ctx))
+        l.load_module(&mut ctx, &name)
+            .map_err(|e| error::to_js(&e, &mut ctx))
     }));
     match r {
         Ok(Ok(m)) => m,
@@ -945,14 +1150,21 @@ unsafe extern "C" fn loader_hook(raw: *mut qjs::JSContext, name: *const c_char, 
             std::ptr::null_mut()
         }
         Err(_) => {
-            crate::js::throw_error(&Context::from_raw(raw), engine::type_error(format!("panic while loading '{name}'")));
+            crate::js::throw_error(
+                &Context::from_raw(raw),
+                engine::type_error(format!("panic while loading '{name}'")),
+            );
             std::ptr::null_mut()
         }
     }
 }
 
 /// Import attributes are accepted as is (JSON modules are recognized by extension).
-unsafe extern "C" fn check_attributes_hook(_ctx: *mut qjs::JSContext, _opaque: *mut c_void, _attributes: qjs::JSValue) -> c_int {
+unsafe extern "C" fn check_attributes_hook(
+    _ctx: *mut qjs::JSContext,
+    _opaque: *mut c_void,
+    _attributes: qjs::JSValue,
+) -> c_int {
     0
 }
 
@@ -993,9 +1205,15 @@ unsafe extern "C" fn synthetic_init(raw: *mut qjs::JSContext, m: *mut qjs::JSMod
 }
 
 /// Compile ES module source named `name` and fill its `import.meta`.
-fn compile_module(ctx: &mut Context, code: &str, name: &str) -> Result<*mut qjs::JSModuleDef, Error> {
+fn compile_module(
+    ctx: &mut Context,
+    code: &str,
+    name: &str,
+) -> Result<*mut qjs::JSModuleDef, Error> {
     let flags = (qjs::JS_EVAL_TYPE_MODULE | qjs::JS_EVAL_FLAG_COMPILE_ONLY) as i32;
-    let value = ctx.eval_with_flags(code.as_bytes(), name, flags).map_err(|e| error::from_js(e, ctx))?;
+    let value = ctx
+        .eval_with_flags(code.as_bytes(), name, flags)
+        .map_err(|e| error::from_js(e, ctx))?;
     let m = unsafe { qjs::JS_VALUE_GET_PTR(value.as_raw()) } as *mut qjs::JSModuleDef;
     let meta = unsafe { JsValue::from_raw(qjs::JS_GetImportMeta(ctx.as_raw(), m)) };
     if let Some(meta) = meta.as_object() {
@@ -1006,16 +1224,25 @@ fn compile_module(ctx: &mut Context, code: &str, name: &str) -> Result<*mut qjs:
 }
 
 fn init_import_meta(ctx: &mut Context, import_meta: &JsObject, name: &str) {
+    if name.starts_with("data:") {
+        let _ = import_meta.set(js_string!("url"), js_str(name), false, ctx);
+        return;
+    }
     let path = Path::new(module_path(name));
     let path_str = path.display().to_string();
     let url = if path.is_absolute() {
-        url::Url::from_file_path(path).map(|u| u.to_string()).unwrap_or_else(|_| path_str.clone())
+        url::Url::from_file_path(path)
+            .map(|u| u.to_string())
+            .unwrap_or_else(|_| path_str.clone())
     } else {
         path_str.clone()
     };
     let _ = import_meta.set(js_string!("url"), js_str(&url), false, ctx);
     if path.is_absolute() {
-        let dir = path.parent().map(|p| p.display().to_string()).unwrap_or_default();
+        let dir = path
+            .parent()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
         let _ = import_meta.set(js_string!("filename"), js_str(&path_str), false, ctx);
         let _ = import_meta.set(js_string!("dirname"), js_str(&dir), false, ctx);
     }
@@ -1027,12 +1254,78 @@ fn init_import_meta(ctx: &mut Context, import_meta: &JsObject, name: &str) {
     }
 }
 
+/// Decode JavaScript source from a Node-compatible data URL module.
+fn decode_data_module(input: &str) -> Option<String> {
+    use base64::Engine as _;
+
+    let rest = input.strip_prefix("data:")?;
+    let (metadata, payload) = rest.split_once(',')?;
+    let mut parts = metadata.split(';');
+    let mime = parts
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("text/plain")
+        .to_ascii_lowercase();
+    let mut is_base64 = false;
+    for param in parts {
+        if param.eq_ignore_ascii_case("base64") {
+            is_base64 = true;
+        } else if let Some((key, value)) = param.split_once('=') {
+            if key.eq_ignore_ascii_case("charset") && !value.is_empty() {
+                continue;
+            }
+        } else if !param.is_empty() {
+            return None;
+        }
+    }
+    if !matches!(
+        mime.as_str(),
+        "text/javascript" | "application/javascript" | "text/ecmascript" | "application/ecmascript"
+    ) {
+        return None;
+    }
+    let bytes = if is_base64 {
+        base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .ok()?
+    } else {
+        let raw = payload.as_bytes();
+        let mut decoded = Vec::with_capacity(raw.len());
+        let mut i = 0;
+        while i < raw.len() {
+            if raw[i] == b'%' {
+                let hi = hex_value(*raw.get(i + 1)?)?;
+                let lo = hex_value(*raw.get(i + 2)?)?;
+                decoded.push((hi << 4) | lo);
+                i += 3;
+            } else {
+                decoded.push(raw[i]);
+                i += 1;
+            }
+        }
+        decoded
+    };
+    String::from_utf8(bytes).ok()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 /// Load, link and evaluate the module named `name` (like `import()`): a promise of its namespace.
 fn load_by_name(ctx: &mut Context, name: &str) -> JsResult<JsPromise> {
     let c = CString::new(name).map_err(|_| engine::type_error("invalid module name"))?;
     let raw = ctx.as_raw();
-    let v = crate::js::check_value(&Context::from_raw(raw), unsafe { qjs::JS_LoadModule(raw, c"".as_ptr(), c.as_ptr()) })?;
-    v.as_promise().ok_or_else(|| engine::type_error("JS_LoadModule did not return a promise"))
+    let v = crate::js::check_value(&Context::from_raw(raw), unsafe {
+        qjs::JS_LoadModule(raw, c"".as_ptr(), c.as_ptr())
+    })?;
+    v.as_promise()
+        .ok_or_else(|| engine::type_error("JS_LoadModule did not return a promise"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1042,27 +1335,43 @@ fn load_by_name(ctx: &mut Context, name: &str) -> JsResult<JsPromise> {
 /// Evaluate a classic script.
 pub(crate) fn eval_script(ctx: &mut Context, code: &str, filename: &str) -> JsResult<JsValue> {
     let cwd = state(ctx).cwd.borrow().clone();
-    let path = if filename.starts_with('<') || filename.starts_with('[') { PathBuf::from(filename) } else { cwd.join(filename) };
-    let code = if filename.ends_with(".ts") || filename.ends_with(".mts") || filename.ends_with(".cts") {
-        let out = transpile::transpile(code, &path, SourceLang::TypeScript).map_err(|e| error::to_js(&e, ctx))?;
-        if let Some(map) = out.source_map {
-            state(ctx).source_maps.borrow_mut().insert(path.display().to_string(), map);
-        }
-        out.code
+    let path = if filename.starts_with('<') || filename.starts_with('[') {
+        PathBuf::from(filename)
     } else {
-        code.to_string()
+        cwd.join(filename)
     };
+    let code =
+        if filename.ends_with(".ts") || filename.ends_with(".mts") || filename.ends_with(".cts") {
+            let out = transpile::transpile(code, &path, SourceLang::TypeScript)
+                .map_err(|e| error::to_js(&e, ctx))?;
+            if let Some(map) = out.source_map {
+                state(ctx)
+                    .source_maps
+                    .borrow_mut()
+                    .insert(path.display().to_string(), map);
+            }
+            out.code
+        } else {
+            code.to_string()
+        };
     ctx.eval(Source::from_bytes(code.as_bytes()).with_path(&path))
 }
 
 /// An ES module from source text (evaluated by [`evaluate_module`]).
-pub(crate) fn module_from_source(ctx: &mut Context, source: &str, filename: &str) -> Result<Module, Error> {
+pub(crate) fn module_from_source(
+    ctx: &mut Context,
+    source: &str,
+    filename: &str,
+) -> Result<Module, Error> {
     let cwd = state(ctx).cwd.borrow().clone();
     let path = normalize(&cwd.join(filename));
     let lang = SourceLang::from_path(&path);
     let out = transpile::transpile(source, &path, lang)?;
     if let Some(map) = out.source_map {
-        state(ctx).source_maps.borrow_mut().insert(path.display().to_string(), map);
+        state(ctx)
+            .source_maps
+            .borrow_mut()
+            .insert(path.display().to_string(), map);
     }
     let l = loader(ctx);
     let code = l.cjs_globals(&out.code, &out.declared_cjs_names);
@@ -1077,7 +1386,11 @@ pub(crate) fn module_from_source(ctx: &mut Context, source: &str, filename: &str
 }
 
 /// Resolve the module for `specifier` (relative to `referrer` or the cwd).
-pub(crate) fn module_for_specifier(ctx: &mut Context, specifier: &str, referrer: Option<&Path>) -> Result<Module, Error> {
+pub(crate) fn module_for_specifier(
+    ctx: &mut Context,
+    specifier: &str,
+    referrer: Option<&Path>,
+) -> Result<Module, Error> {
     let l = loader(ctx);
     let base = referrer_dir(ctx, referrer);
     let resolved = l.resolve(ctx, specifier, &base, Kind::Import)?;
@@ -1085,16 +1398,26 @@ pub(crate) fn module_for_specifier(ctx: &mut Context, specifier: &str, referrer:
 }
 
 /// Load, link and evaluate `module`; `done` receives the namespace or the error.
-pub(crate) fn evaluate_module(ctx: &mut Context, module: Module, done: impl FnOnce(&mut Context, Result<JsValue, JsValue>) + 'static) {
+pub(crate) fn evaluate_module(
+    ctx: &mut Context,
+    module: Module,
+    done: impl FnOnce(&mut Context, Result<JsValue, JsValue>) + 'static,
+) {
     let promise = load_by_name(ctx, &module.0).map(JsValue::from);
     engine::when_settled(ctx, promise, done);
 }
 
 /// `require(specifier)` from `parent` (a filename) or the cwd.
-pub(crate) fn require(ctx: &mut Context, specifier: &str, parent: Option<&Path>) -> JsResult<JsValue> {
+pub(crate) fn require(
+    ctx: &mut Context,
+    specifier: &str,
+    parent: Option<&Path>,
+) -> JsResult<JsValue> {
     let l = loader(ctx);
     let base = referrer_dir(ctx, parent);
-    let resolved = l.resolve(ctx, specifier, &base, Kind::Require).map_err(|e| error::to_js(&e, ctx))?;
+    let resolved = l
+        .resolve(ctx, specifier, &base, Kind::Require)
+        .map_err(|e| error::to_js(&e, ctx))?;
     l.require_resolved(ctx, &resolved)
 }
 
@@ -1111,13 +1434,28 @@ fn op_require(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsVa
 fn op_require_resolve(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let spec = arg_string(args, 0, ctx)?;
     let parent = arg_opt_string(args, 1, ctx)?;
-    let kind = if args.get_or_undefined(2).to_boolean() { Kind::Import } else { Kind::Require };
+    let kind = if args.get_or_undefined(2).to_boolean() {
+        Kind::Import
+    } else {
+        Kind::Require
+    };
     let l = loader(ctx);
     let base = referrer_dir(ctx, parent.as_deref().map(Path::new));
-    match l.resolve(ctx, &spec, &base, kind).map_err(|e| error::to_js(&e, ctx))? {
-        Resolved::Builtin(n) => Ok(js_str(if n.starts_with("jsrt:") { n.clone() } else { format!("node:{n}") }.as_str())),
+    match l
+        .resolve(ctx, &spec, &base, kind)
+        .map_err(|e| error::to_js(&e, ctx))?
+    {
+        Resolved::Builtin(n) => Ok(js_str(
+            if n.starts_with("jsrt:") {
+                n.clone()
+            } else {
+                format!("node:{n}")
+            }
+            .as_str(),
+        )),
         Resolved::Virtual(s) => Ok(js_str(&s)),
         Resolved::File(p) => Ok(js_str(&p.display().to_string())),
+        Resolved::Data { url, .. } => Ok(js_str(&url)),
     }
 }
 
@@ -1145,7 +1483,12 @@ fn op_get_cwd(_: &JsValue, _: &[JsValue], ctx: &mut Context) -> JsResult<JsValue
 fn op_transpile(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let code = arg_string(args, 0, ctx)?;
     let name = arg_opt_string(args, 1, ctx)?.unwrap_or_else(|| "input.ts".into());
-    let out = transpile::transpile(&code, Path::new(&name), SourceLang::from_path(Path::new(&name))).map_err(|e| error::to_js(&e, ctx))?;
+    let out = transpile::transpile(
+        &code,
+        Path::new(&name),
+        SourceLang::from_path(Path::new(&name)),
+    )
+    .map_err(|e| error::to_js(&e, ctx))?;
     Ok(js_str(&out.code))
 }
 
@@ -1154,8 +1497,12 @@ fn op_transpile(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<Js
 fn op_is_common_js(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let path = arg_string(args, 0, ctx)?;
     let l = loader(ctx);
-    let Some(resolved) = l.resolve_path(Path::new(&path), Kind::Require) else { return Ok(JsValue::from(false)) };
-    let cjs = l.prepare_file(ctx, &resolved).is_ok_and(|p| p.format == Format::Cjs);
+    let Some(resolved) = l.resolve_path(Path::new(&path), Kind::Require) else {
+        return Ok(JsValue::from(false));
+    };
+    let cjs = l
+        .prepare_file(ctx, &resolved)
+        .is_ok_and(|p| p.format == Format::Cjs);
     Ok(JsValue::from(cjs))
 }
 
@@ -1191,12 +1538,35 @@ mod tests {
         });
         let imp = &["import", "node", "default"];
         let req = &["require", "node", "default"];
-        assert_eq!(resolve_exports(&exports, ".", imp).as_deref(), Some("./esm/index.js"));
-        assert_eq!(resolve_exports(&exports, ".", req).as_deref(), Some("./cjs/index.js"));
-        assert_eq!(resolve_exports(&exports, "./compile", req).as_deref(), Some("./cjs/compile.js"));
-        assert_eq!(resolve_exports(&exports, "./features/a/b", imp).as_deref(), Some("./src/features/a/b.js"));
-        assert_eq!(resolve_exports(&json!("./main.js"), ".", imp).as_deref(), Some("./main.js"));
-        assert_eq!(resolve_exports(&json!({"import": "./m.mjs", "default": "./m.cjs"}), ".", req).as_deref(), Some("./m.cjs"));
+        assert_eq!(
+            resolve_exports(&exports, ".", imp).as_deref(),
+            Some("./esm/index.js")
+        );
+        assert_eq!(
+            resolve_exports(&exports, ".", req).as_deref(),
+            Some("./cjs/index.js")
+        );
+        assert_eq!(
+            resolve_exports(&exports, "./compile", req).as_deref(),
+            Some("./cjs/compile.js")
+        );
+        assert_eq!(
+            resolve_exports(&exports, "./features/a/b", imp).as_deref(),
+            Some("./src/features/a/b.js")
+        );
+        assert_eq!(
+            resolve_exports(&json!("./main.js"), ".", imp).as_deref(),
+            Some("./main.js")
+        );
+        assert_eq!(
+            resolve_exports(
+                &json!({"import": "./m.mjs", "default": "./m.cjs"}),
+                ".",
+                req
+            )
+            .as_deref(),
+            Some("./m.cjs")
+        );
         assert_eq!(resolve_exports(&exports, "./missing", imp), None);
     }
 
