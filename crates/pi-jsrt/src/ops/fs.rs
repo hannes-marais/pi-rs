@@ -83,6 +83,7 @@ pub(crate) enum FsOut {
 /// Open files keyed by their raw fd (shared across threads for async fd ops).
 static FILES: std::sync::LazyLock<parking_lot::Mutex<HashMap<i32, std::sync::Arc<parking_lot::Mutex<fs::File>>>>> =
     std::sync::LazyLock::new(Default::default);
+static NEXT_FD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(3);
 
 thread_local! {
     static OWNED_FDS: std::cell::RefCell<Vec<i32>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -242,6 +243,7 @@ fn copy_recursive(from: &Path, to: &Path, force: bool, error_on_exist: bool) -> 
     }
 }
 
+#[cfg(unix)]
 fn file_for(fd: i32) -> std::io::Result<std::sync::Arc<parking_lot::Mutex<fs::File>>> {
     let mut files = FILES.lock();
     if let Some(f) = files.get(&fd) {
@@ -261,6 +263,49 @@ fn file_for(fd: i32) -> std::io::Result<std::sync::Arc<parking_lot::Mutex<fs::Fi
         }
     }
     Err(std::io::Error::from_raw_os_error(libc::EBADF))
+}
+
+#[cfg(windows)]
+fn file_for(fd: i32) -> std::io::Result<std::sync::Arc<parking_lot::Mutex<fs::File>>> {
+    use std::os::windows::io::FromRawHandle;
+    use windows_sys::Win32::Foundation::DUPLICATE_SAME_ACCESS;
+    use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
+    use windows_sys::Win32::System::Threading::{DuplicateHandle, GetCurrentProcess};
+
+    let mut files = FILES.lock();
+    if let Some(file) = files.get(&fd) {
+        return Ok(file.clone());
+    }
+    let which = match fd {
+        0 => STD_INPUT_HANDLE,
+        1 => STD_OUTPUT_HANDLE,
+        2 => STD_ERROR_HANDLE,
+        _ => return Err(std::io::Error::from_raw_os_error(libc::EBADF)),
+    };
+    // SAFETY: the process standard handle is borrowed; DuplicateHandle creates a new
+    // owned handle so File may close it without affecting the process standard stream.
+    unsafe {
+        let process = GetCurrentProcess();
+        let source = GetStdHandle(which);
+        let mut duplicate = std::ptr::null_mut();
+        if source.is_null() || DuplicateHandle(process, source, process, &mut duplicate, 0, 0, DUPLICATE_SAME_ACCESS) == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let file = fs::File::from_raw_handle(duplicate);
+        let file = std::sync::Arc::new(parking_lot::Mutex::new(file));
+        files.insert(fd, file.clone());
+        Ok(file)
+    }
+}
+
+#[cfg(unix)]
+fn permissions_from_mode(mode: u32) -> fs::Permissions {
+    fs::Permissions::from_mode(mode)
+}
+
+#[cfg(windows)]
+fn permissions_from_mode(mode: u32) -> fs::Permissions {
+    fs::Permissions::from_readonly(mode & 0o222 == 0)
 }
 
 /// Execute an op (blocking).
@@ -389,7 +434,7 @@ pub(crate) fn exec(op: FsOp) -> Result<FsOut, Error> {
             FsOut::Unit
         }
         Chmod(p, mode) => {
-            fs::set_permissions(&p, fs::Permissions::from_mode(mode)).map_err(|e| err(e, "chmod", &p))?;
+            fs::set_permissions(&p, permissions_from_mode(mode)).map_err(|e| err(e, "chmod", &p))?;
             FsOut::Unit
         }
         Utimes(p, atime, mtime) => {
@@ -421,9 +466,8 @@ pub(crate) fn exec(op: FsOp) -> Result<FsOut, Error> {
             return Err(Error::host("mkdtemp: too many attempts"));
         }
         Open { path, flags, mode } => {
-            use std::os::fd::AsRawFd;
             let f = open_options(&flags, mode).open(&path).map_err(|e| err(e, "open", &path))?;
-            let fd = f.as_raw_fd();
+            let fd = NEXT_FD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             FILES.lock().insert(fd, std::sync::Arc::new(parking_lot::Mutex::new(f)));
             FsOut::Num(fd as f64)
         }
@@ -477,7 +521,7 @@ pub(crate) fn exec(op: FsOp) -> Result<FsOut, Error> {
         }
         Fchmod(fd, mode) => {
             let f = file_for(fd).map_err(|e| io_error(&e, "fchmod", None))?;
-            f.lock().set_permissions(fs::Permissions::from_mode(mode)).map_err(|e| io_error(&e, "fchmod", None))?;
+            f.lock().set_permissions(permissions_from_mode(mode)).map_err(|e| io_error(&e, "fchmod", None))?;
             FsOut::Unit
         }
     })

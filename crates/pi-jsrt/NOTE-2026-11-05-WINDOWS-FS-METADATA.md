@@ -11,3 +11,5 @@ Updated: 2026-11-05. The Anvil Windows build passed the filesystem metadata erro
 Updated: 2026-11-05. The child process ExitStatus mapping now uses Windows' native process exit code with no fabricated Unix signal and the prior Unix signal mapping remains unchanged. Linux pi-jsrt check passes; Windows build is required to advance the remaining child-process and signal blockers.
 
 Updated: 2026-11-05. Rust 1.97 marks Windows volume serial and file index metadata access unstable, so dev/ino are reported as zero until a stable handle-based implementation is added; ownership, block allocation and POSIX ctime are likewise unavailable.
+
+Updated: 2026-11-05. File descriptors returned by fs.open are now runtime table IDs rather than host raw descriptors, allowing the same FsOp contract on pointer-sized Windows handles. Standard streams lower through duplicated Win32 handles; Windows chmod lowers permission bits to the native readonly attribute. Linux pi-jsrt check passes; Anvil Windows compilation is the next validation.
