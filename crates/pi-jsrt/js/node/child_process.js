@@ -185,7 +185,12 @@ function spawn(command, args, options) {
     return child;
   }
   const extra = [];
-  for (let i = 3; i < stdio.length; i++) if (stdio[i] === "pipe" || stdio[i] === "ipc") extra.push(i);
+  for (let i = 3; i < stdio.length; i++) {
+    if (stdio[i] === "pipe" || stdio[i] === "ipc") {
+      // Windows IPC uses a native named pipe supplied by the process backend; it is not a CRT fd.
+      if (process.platform !== "win32" || stdio[i] !== "ipc") extra.push(i);
+    }
+  }
   const ipcIndex = stdio.indexOf("ipc");
   let env = opts.env ?? process.env;
   if (ipcIndex >= 0) {
@@ -195,13 +200,18 @@ function spawn(command, args, options) {
       err.code = "ERR_INVALID_ARG_VALUE";
       throw err;
     }
-    env = { ...env, NODE_CHANNEL_FD: String(ipcIndex), NODE_CHANNEL_SERIALIZATION_MODE: serialization };
-    if (ipcIndex < 3) extra.push(ipcIndex);
+    env = { ...env, NODE_CHANNEL_SERIALIZATION_MODE: serialization };
+    if (process.platform !== "win32") {
+      env.NODE_CHANNEL_FD = String(ipcIndex);
+      if (ipcIndex < 3) extra.push(ipcIndex);
+    }
   }
   const res = ops.spawn(n.file, n.args, {
     cwd: resolveCwd(opts.cwd),
     env: envPairs(env),
     stdio: stdio.slice(0, 3).map((m) => (m === "ipc" ? "ignore" : m)),
+    ipc: ipcIndex >= 0,
+    ipcFd: ipcIndex,
     detached: Boolean(opts.detached),
     argv0: opts.argv0,
     extra,

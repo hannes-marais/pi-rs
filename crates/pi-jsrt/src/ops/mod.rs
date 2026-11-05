@@ -19,6 +19,10 @@ pub(crate) mod encoding;
 pub(crate) mod fetch;
 pub(crate) mod fs;
 pub(crate) mod http2;
+#[cfg(unix)]
+pub(crate) mod ipc;
+#[cfg(windows)]
+#[path = "ipc_windows.rs"]
 pub(crate) mod ipc;
 pub(crate) mod keys;
 pub(crate) mod net;

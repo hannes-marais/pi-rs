@@ -65,6 +65,10 @@ struct SpawnOpts {
     argv0: Option<String>,
     /// stdio entries past 2 that are socket pairs (`'ipc'` channels and `'pipe'`s): child fd numbers.
     extra: Vec<i32>,
+    #[cfg(windows)]
+    ipc: bool,
+    #[cfg(windows)]
+    ipc_fd: Option<i32>,
     /// `uid`/`gid` options.
     uid: Option<u32>,
     gid: Option<u32>,
@@ -124,7 +128,11 @@ fn read_opts(args: &[JsValue], ctx: &mut Context) -> JsResult<SpawnOpts> {
     let uid = num(o.get(js_string!("uid"), ctx)?, ctx)?;
     let gid = num(o.get(js_string!("gid"), ctx)?, ctx)?;
     #[cfg(windows)]
-    if uid.is_some() || gid.is_some() || argv0.is_some() || !extra.is_empty() {
+    let ipc = o.get(js_string!("ipc"), ctx)?.to_boolean();
+    #[cfg(windows)]
+    let ipc_fd = num(o.get(js_string!("ipcFd"), ctx)?, ctx)?.map(|fd| fd as i32);
+    #[cfg(windows)]
+    if uid.is_some() || gid.is_some() || argv0.is_some() || !extra.is_empty() || (ipc && ipc_fd.is_none()) {
         return Err(super::coded_error(
             ctx,
             "Error",
@@ -141,6 +149,10 @@ fn read_opts(args: &[JsValue], ctx: &mut Context) -> JsResult<SpawnOpts> {
         detached,
         argv0,
         extra,
+        #[cfg(windows)]
+        ipc,
+        #[cfg(windows)]
+        ipc_fd,
         uid,
         gid,
     })
@@ -313,8 +325,14 @@ fn status_parts(status: &std::process::ExitStatus) -> (JsValue, JsValue) {
 fn op_spawn(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let o = read_opts(args, ctx)?;
     let st = state(ctx);
+    #[cfg(windows)]
+    let ipc_pipe = if o.ipc {
+        Some(super::ipc::prepare_pipe().map_err(|e| super::throw_io(ctx, &e, "CreateNamedPipeW", None))?)
+    } else { None };
     let mut std_cmd = std::process::Command::new(&o.file);
     apply_common(&mut std_cmd, &o);
+    #[cfg(windows)]
+    if let Some((name, _)) = &ipc_pipe { std_cmd.env("NODE_CHANNEL_FD", name); }
     std_cmd.stdin(stdio(o.stdio[0])).stdout(stdio(o.stdio[1])).stderr(stdio(o.stdio[2]));
     let (extra_parents, extra_children) = match extra_stdio(&mut std_cmd, &o) {
         Ok(v) => v,
@@ -401,6 +419,12 @@ fn op_spawn(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValu
     for (fd, parent) in extra_parents {
         let channel = super::ipc::start(ctx, parent).map_err(|e| super::throw_io(ctx, &e, "socketpair", None))?;
         extra.push(JsValue::from(fd));
+        extra.push(JsValue::from(channel as f64));
+    }
+    #[cfg(windows)]
+    if let Some((_, server)) = ipc_pipe {
+        let channel = super::ipc::start_server(ctx, server);
+        extra.push(JsValue::from(o.ipc_fd.unwrap_or(0)));
         extra.push(JsValue::from(channel as f64));
     }
     let extra = super::array(ctx, extra);

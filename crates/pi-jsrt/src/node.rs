@@ -181,11 +181,14 @@ where
                 return 1;
             }
         }
+        let ipc_fd = startup.get("NODE_CHANNEL_FD").map(|value| {
+            value.parse::<i64>().map(Value::from).unwrap_or_else(|_| Value::String(value.clone()))
+        });
         let main = json!({
             "file": script.map(|s| s.display().to_string()),
             "eval": eval,
             "print": parsed.print,
-            "ipcFd": startup.get("NODE_CHANNEL_FD").and_then(|v| v.parse::<i64>().ok()),
+            "ipcFd": ipc_fd,
             "serialization": startup.get("NODE_CHANNEL_SERIALIZATION_MODE").cloned().unwrap_or_else(|| "json".into()),
             "uniqueId": startup.get("NODE_UNIQUE_ID"),
         });

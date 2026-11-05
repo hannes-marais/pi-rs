@@ -346,27 +346,11 @@ fn op_dns_lookup_service(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> Js
             let sa = SocketAddr::new(addr, port);
             let addr2 = address.clone();
             tokio::task::spawn_blocking(move || {
-                let (storage, len) = sockaddr_of(&sa);
-                let mut host = [0 as libc::c_char; 1025];
-                let mut serv = [0 as libc::c_char; 32];
-                // SAFETY: buffers are valid for their lengths; storage holds a sockaddr of `len`.
-                let r = unsafe {
-                    libc::getnameinfo(
-                        (&storage as *const libc::sockaddr_storage).cast(),
-                        len,
-                        host.as_mut_ptr(),
-                        host.len() as libc::socklen_t,
-                        serv.as_mut_ptr(),
-                        serv.len() as libc::socklen_t,
-                        libc::NI_NAMEREQD,
-                    )
-                };
-                if r != 0 {
-                    return Err(dns_error("ENOTFOUND", "getnameinfo", &addr2));
-                }
-                // SAFETY: getnameinfo NUL-terminates on success.
-                let cstr = |b: &[libc::c_char]| unsafe { std::ffi::CStr::from_ptr(b.as_ptr()) }.to_string_lossy().into_owned();
-                Ok((cstr(&host), cstr(&serv)))
+                #[cfg(unix)]
+                let result = lookup_service_unix(&sa);
+                #[cfg(windows)]
+                let result = lookup_service_windows(&sa);
+                result.ok_or_else(|| dns_error("ENOTFOUND", "getnameinfo", &addr2))
             })
             .await
             .map_err(|_| dns_error("EAI_FAIL", "getnameinfo", &address))?
@@ -375,6 +359,30 @@ fn op_dns_lookup_service(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> Js
     ))
 }
 
+#[cfg(unix)]
+fn lookup_service_unix(sa: &SocketAddr) -> Option<(String, String)> {
+    let (storage, len) = sockaddr_of(sa);
+    let mut host = [0 as libc::c_char; 1025];
+    let mut serv = [0 as libc::c_char; 32];
+    // SAFETY: buffers are valid for their lengths; storage holds a sockaddr of `len`.
+    let r = unsafe {
+        libc::getnameinfo(
+            (&storage as *const libc::sockaddr_storage).cast(),
+            len,
+            host.as_mut_ptr(),
+            host.len() as libc::socklen_t,
+            serv.as_mut_ptr(),
+            serv.len() as libc::socklen_t,
+            libc::NI_NAMEREQD,
+        )
+    };
+    if r != 0 { return None; }
+    // SAFETY: getnameinfo NUL-terminates both buffers on success.
+    let cstr = |b: &[libc::c_char]| unsafe { std::ffi::CStr::from_ptr(b.as_ptr()) }.to_string_lossy().into_owned();
+    Some((cstr(&host), cstr(&serv)))
+}
+
+#[cfg(unix)]
 fn sockaddr_of(sa: &SocketAddr) -> (libc::sockaddr_storage, libc::socklen_t) {
     // SAFETY: sockaddr_storage is plain data large enough for both families.
     let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
@@ -417,6 +425,60 @@ fn sockaddr_of(sa: &SocketAddr) -> (libc::sockaddr_storage, libc::socklen_t) {
             // SAFETY: writing a sockaddr_in6 into the storage.
             unsafe { std::ptr::write((&mut storage as *mut libc::sockaddr_storage).cast(), sin6) };
             (storage, std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t)
+        }
+    }
+}
+
+#[cfg(windows)]
+fn lookup_service_windows(sa: &SocketAddr) -> Option<(String, String)> {
+    use windows_sys::Win32::Networking::WinSock::{getnameinfo, SOCKADDR, SOCKADDR_STORAGE, NI_NAMEREQD};
+    let (storage, len) = sockaddr_of_windows(sa);
+    let mut host = [0u8; 1025];
+    let mut service = [0u8; 32];
+    // SAFETY: both output buffers are writable and storage contains a correctly sized sockaddr.
+    let r = unsafe {
+        getnameinfo(
+            (&storage as *const SOCKADDR_STORAGE).cast::<SOCKADDR>(),
+            len,
+            host.as_mut_ptr(),
+            host.len() as u32,
+            service.as_mut_ptr(),
+            service.len() as u32,
+            NI_NAMEREQD as i32,
+        )
+    };
+    if r != 0 { return None; }
+    // SAFETY: getnameinfo NUL-terminates each buffer on success.
+    let text = |buf: &[u8]| unsafe { std::ffi::CStr::from_ptr(buf.as_ptr().cast()) }.to_string_lossy().into_owned();
+    Some((text(&host), text(&service)))
+}
+
+#[cfg(windows)]
+fn sockaddr_of_windows(sa: &SocketAddr) -> (windows_sys::Win32::Networking::WinSock::SOCKADDR_STORAGE, i32) {
+    use windows_sys::Win32::Networking::WinSock::{IN6_ADDR, IN6_ADDR_0, IN_ADDR, IN_ADDR_0, SOCKADDR_IN, SOCKADDR_IN6, SOCKADDR_IN6_0, SOCKADDR_STORAGE, AF_INET, AF_INET6};
+    let mut storage = SOCKADDR_STORAGE::default();
+    match sa {
+        SocketAddr::V4(v4) => {
+            let sin = SOCKADDR_IN {
+                sin_family: AF_INET,
+                sin_port: v4.port().to_be(),
+                sin_addr: IN_ADDR { S_un: IN_ADDR_0 { S_addr: u32::from_ne_bytes(v4.ip().octets()) } },
+                sin_zero: [0; 8],
+            };
+            // SAFETY: SOCKADDR_STORAGE is large and aligned for SOCKADDR_IN.
+            unsafe { std::ptr::write((&mut storage as *mut SOCKADDR_STORAGE).cast(), sin) };
+            (storage, std::mem::size_of::<SOCKADDR_IN>() as i32)
+        }
+        SocketAddr::V6(v6) => {
+            let mut sin6 = SOCKADDR_IN6::default();
+            sin6.sin6_family = AF_INET6;
+            sin6.sin6_port = v6.port().to_be();
+            sin6.sin6_flowinfo = v6.flowinfo();
+            sin6.sin6_addr = IN6_ADDR { u: IN6_ADDR_0 { Byte: v6.ip().octets() } };
+            sin6.Anonymous = SOCKADDR_IN6_0 { sin6_scope_id: v6.scope_id() };
+            // SAFETY: SOCKADDR_STORAGE is large and aligned for SOCKADDR_IN6.
+            unsafe { std::ptr::write((&mut storage as *mut SOCKADDR_STORAGE).cast(), sin6) };
+            (storage, std::mem::size_of::<SOCKADDR_IN6>() as i32)
         }
     }
 }
