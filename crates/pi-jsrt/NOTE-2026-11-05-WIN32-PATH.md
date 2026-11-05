@@ -24,3 +24,14 @@ runtime tests, and rerun the official Anvil profile build to execute the same
 Maw test on OptiPlex1. This host-loader correction is governed by EMgine
 architecture principles 3, 6, 13, 21, 24, 27 and 30; the open work is
 `vm-hbjr` / `vm-8x76`. No system Node executable is part of this path.
+
+Updated: 2026-11-05. After commit `5001574` fixed host-native absolute module
+resolution, the same official Anvil profile operation
+`0f0b1429-5705-4781-8254-6c3a1fe327fb` advanced the preserved Maw sidecar test
+past module loading. It now fails in `js/node/misc.js::pathToFileURL`: the
+native `C:\\Users\\...` path is encoded as `file://C:%5CUsers...`, which
+`URL` rejects with `ERR_INVALID_URL`. The earlier diagnosis was incomplete;
+source staging and absolute module lookup are functioning. Add host-aware
+Windows file URL conversion and regression coverage, preserving POSIX URL
+behavior; then rerun the same full Anvil profile build on OptiPlex1. The
+verification remains the Pi QuickJS runtime, not a system Node executable.

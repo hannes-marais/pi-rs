@@ -31,13 +31,20 @@ function fileURLToPath(url) {
 }
 
 function pathToFileURL(p) {
-  let resolved = path.resolve(String(p));
-  if (String(p).endsWith("/") && !resolved.endsWith("/")) resolved += "/";
+  const input = String(p);
+  let resolved = path.resolve(input);
+  const trailingSeparator = input.endsWith("/") || (process.platform === "win32" && input.endsWith("\\"));
+  if (trailingSeparator && !resolved.endsWith("/") && !resolved.endsWith("\\")) {
+    resolved += process.platform === "win32" ? "\\" : "/";
+  }
+  const windowsPath = process.platform === "win32";
+  if (windowsPath) resolved = resolved.replace(/\\/g, "/");
   const encoded = resolved
     .split("/")
     .map((seg) => encodeURIComponent(seg).replace(/%40/g, "@").replace(/%3A/g, ":").replace(/%2B/g, "+").replace(/%2C/g, ",").replace(/%3D/g, "=").replace(/%24/g, "$").replace(/%26/g, "&"))
     .join("/");
-  return new internal.URL(`file://${encoded}`);
+  const prefix = windowsPath && /^[A-Za-z]:\//.test(resolved) ? "file:///" : "file://";
+  return new internal.URL(`${prefix}${encoded}`);
 }
 
 function legacyParse(urlStr, parseQueryString) {

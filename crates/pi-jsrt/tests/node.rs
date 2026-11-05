@@ -265,6 +265,8 @@ async fn events_util_buffer_crypto() {
             uuid: /^[0-9a-f-]{36}$/.test(randomUUID()), rb: crypto.randomBytes(8).length,
             decoded, assertMsg,
             f2p: fileURLToPath("file:///tmp/a%20b.txt"), p2f: pathToFileURL("/tmp/a b.txt").href,
+            winP2f: pathToFileURL("C:\\Users\\hannes\\AppData\\Local\\Temp\\a b.txt").href,
+            platform: process.platform,
             types: [util.types.isPromise(Promise.resolve()), util.types.isDate(new Date())],
             reqPath: typeof req("node:path").join,
             isDeep: util.isDeepStrictEqual([1, 2], [1, 2]),
@@ -298,6 +300,9 @@ async fn events_util_buffer_crypto() {
     assert_eq!(v["assertMsg"], json!("ERR_ASSERTION"));
     assert_eq!(v["f2p"], json!("/tmp/a b.txt"));
     assert_eq!(v["p2f"], json!("file:///tmp/a%20b.txt"));
+    if v["platform"] == "win32" {
+        assert_eq!(v["winP2f"], json!("file:///C:/Users/hannes/AppData/Local/Temp/a%20b.txt"));
+    }
     assert_eq!(v["types"], json!([true, true]));
     assert_eq!(v["reqPath"], json!("function"));
     assert_eq!(v["isDeep"], json!(true));
