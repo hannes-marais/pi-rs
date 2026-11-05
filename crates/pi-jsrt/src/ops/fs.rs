@@ -131,7 +131,8 @@ fn stat_data(m: &fs::Metadata) -> StatData {
         dev: 0,
         ino: 0,
         mode: kind | permissions,
-        nlink: m.number_of_links().unwrap_or(1) as u64,
+        // Windows MetadataExt::number_of_links is still unstable on Rust 1.97.
+        nlink: 1,
         uid: 0,
         gid: 0,
         rdev: 0,
