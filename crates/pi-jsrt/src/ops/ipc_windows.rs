@@ -97,10 +97,10 @@ pub(crate) fn start_server(ctx: &mut Context, server: NamedPipeServer) -> u64 {
     tokio.spawn(async move {
         match tokio::time::timeout(std::time::Duration::from_secs(30), server.connect()).await {
             Ok(Ok(())) => start_tasks(&io, poster, id, server, rx, pending),
-            _ => poster.post(move |ctx| {
+            _ => { let _ = poster.post(move |ctx| {
                 CHANNELS.with(|c| c.borrow_mut().remove(&id));
                 dispatch(ctx, id, vec![js_str("close")]);
-            }),
+            }); }
         }
     });
     id

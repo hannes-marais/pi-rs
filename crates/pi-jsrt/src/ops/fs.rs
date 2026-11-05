@@ -234,12 +234,32 @@ fn copy_recursive(from: &Path, to: &Path, force: bool, error_on_exist: bool) -> 
             }
             fs::remove_file(to)?;
         }
-        std::os::unix::fs::symlink(target, to)
+        create_symlink(&target, to, from)
     } else {
         if to.exists() && !force {
             return if error_on_exist { Err(std::io::ErrorKind::AlreadyExists.into()) } else { Ok(()) };
         }
         fs::copy(from, to).map(|_| ())
+    }
+}
+
+#[cfg(unix)]
+fn create_symlink(target: &Path, link: &Path, _source: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn create_symlink(target: &Path, link: &Path, source: &Path) -> std::io::Result<()> {
+    use std::os::windows::fs::{symlink_dir, symlink_file};
+    let resolved_target = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        source.parent().unwrap_or_else(|| Path::new(".")).join(target)
+    };
+    if resolved_target.metadata().map(|m| m.is_dir()).unwrap_or(false) {
+        symlink_dir(target, link)
+    } else {
+        symlink_file(target, link)
     }
 }
 
@@ -268,9 +288,9 @@ fn file_for(fd: i32) -> std::io::Result<std::sync::Arc<parking_lot::Mutex<fs::Fi
 #[cfg(windows)]
 fn file_for(fd: i32) -> std::io::Result<std::sync::Arc<parking_lot::Mutex<fs::File>>> {
     use std::os::windows::io::FromRawHandle;
-    use windows_sys::Win32::Foundation::DUPLICATE_SAME_ACCESS;
+    use windows_sys::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS};
     use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
-    use windows_sys::Win32::System::Threading::{DuplicateHandle, GetCurrentProcess};
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
     let mut files = FILES.lock();
     if let Some(file) = files.get(&fd) {
@@ -440,7 +460,7 @@ pub(crate) fn exec(op: FsOp) -> Result<FsOut, Error> {
         Realpath(p) => FsOut::Str(fs::canonicalize(&p).map_err(|e| err(e, "realpath", &p))?.display().to_string()),
         Readlink(p) => FsOut::Str(fs::read_link(&p).map_err(|e| err(e, "readlink", &p))?.display().to_string()),
         Symlink(target, p) => {
-            std::os::unix::fs::symlink(&target, &p).map_err(|e| err(e, "symlink", &p))?;
+            create_symlink(Path::new(&target), Path::new(&p), Path::new(&target)).map_err(|e| err(e, "symlink", &p))?;
             FsOut::Unit
         }
         Link(a, b) => {

@@ -195,7 +195,7 @@ fn windows_process_kill(pid: u32, sig: i32) -> bool {
         let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
         if process.is_null() { return false; }
         let mut code = 0;
-        let ok = unsafe { GetExitCodeProcess(process, &mut code) } != 0 && code == STILL_ACTIVE;
+        let ok = unsafe { GetExitCodeProcess(process, &mut code) } != 0 && code == STILL_ACTIVE as u32;
         unsafe { CloseHandle(process) };
         return ok;
     }

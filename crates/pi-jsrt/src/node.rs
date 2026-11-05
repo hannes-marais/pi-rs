@@ -222,6 +222,7 @@ where
 
 /// Like Node's `PlatformInit`: start from default signal dispositions (SIGPIPE and SIGXFSZ
 /// ignored) and an empty signal mask, whatever the parent left behind.
+#[cfg(unix)]
 fn reset_signals() {
     // SAFETY: plain sigaction/sigprocmask calls at startup, before other threads exist.
     unsafe {
@@ -238,6 +239,11 @@ fn reset_signals() {
         libc::sigemptyset(&mut set);
         libc::pthread_sigmask(libc::SIG_SETMASK, &set, std::ptr::null_mut());
     }
+}
+
+#[cfg(windows)]
+fn reset_signals() {
+    // Windows has no inherited POSIX signal disposition or pthread signal mask.
 }
 
 /// Call `internal[name](arg)` (awaiting a returned promise).

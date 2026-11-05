@@ -39,7 +39,7 @@ fn start_dispatcher() -> bool {
         let (tx, rx) = mpsc::sync_channel::<i32>(64);
         if unsafe { windows_sys::Win32::System::Console::SetConsoleCtrlHandler(Some(console_handler), 1) } == 0 { return; }
         let _ = SENDER.set(tx);
-        std::thread::Builder::new().name("pi-jsrt-console-events".into()).spawn(move || {
+        if std::thread::Builder::new().name("pi-jsrt-console-events".into()).spawn(move || {
             while let Ok(sig) = rx.recv() {
                 let posts: Vec<_> = SUBSCRIBERS.lock().iter().filter(|s| s.signo == sig).map(|s| s.poster.clone()).collect();
                 for poster in posts {
