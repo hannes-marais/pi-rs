@@ -13,3 +13,7 @@ Risks: Windows console VT input and handle signaling differ from POSIX polling; 
 Validation: Linux `cargo check -p pi-jsrt` passed before this new finding. Next run workspace Linux compile, publish, repeat the exact registered Anvil Windows release build, then native OptiPlex1 acceptance.
 
 Implementation update: `terminal_windows.rs` now exports a Windows `ProcessTerminal` backed by Windows Console APIs. It saves/restores console modes, enables VT processing and input on attached consoles, sends Kitty/DA and program-status queries, reuses `StdinBuffer` and shared sequence parsing, polls console dimensions, writes progress/status output, and uses a stop event to wake and join its reader. Linux command `rustup run 1.97.0 cargo check --offline -p pi-tui -p pi-coding-agent` passed. Redirected stdin does not start the console reader; env-based dimensions remain the fallback. The Windows build and native terminal lifecycle are still pending.
+
+Updated: 2026-11-05
+
+Anvil operation `532f966b-267f-4658-a06f-c74e99525e88` compiled the new Windows TUI module and found one error at reader-thread creation: Windows `HANDLE` is a raw pointer and is not `Send`. Keep the handle stored as an integer token across the thread boundary and cast to `HANDLE` only inside the Windows reader.

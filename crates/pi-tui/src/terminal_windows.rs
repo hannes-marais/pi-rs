@@ -203,7 +203,8 @@ impl ProcessTerminal {
         }
     }
 
-    fn reader_loop(self, stop_event: HANDLE) {
+    fn reader_loop(self, stop_event_token: isize) {
+        let stop_event = stop_event_token as HANDLE;
         let mut carry = Vec::new();
         let mut bytes = [0u8; 8192];
         let mut previous_size = window_size(self.inner.output as HANDLE);
@@ -375,7 +376,7 @@ impl Terminal for ProcessTerminal {
                 let me = self.clone();
                 let thread = std::thread::Builder::new()
                     .name("pi-tui-windows-stdin".into())
-                    .spawn(move || me.reader_loop(stop));
+                    .spawn(move || me.reader_loop(stop as isize));
                 if let Ok(thread) = thread {
                     state.reader = Some((stop as isize, thread));
                 } else {
