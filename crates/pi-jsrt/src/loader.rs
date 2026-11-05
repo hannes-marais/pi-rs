@@ -111,6 +111,12 @@ pub(crate) struct Loader {
     evals: Cell<u32>,
 }
 
+/// Absolute module file specifiers follow the runtime host's path syntax.
+/// In particular, Windows drive and UNC paths do not start with `/`.
+fn is_absolute_file_specifier(spec: &str) -> bool {
+    spec.starts_with('/') || Path::new(spec).is_absolute()
+}
+
 impl Loader {
     pub(crate) fn new(shared: Arc<Shared>) -> Self {
         Loader {
@@ -223,7 +229,7 @@ impl Loader {
                 .unwrap_or_else(|| PathBuf::from(rest));
             return self.resolve_path(&path, kind).map(Resolved::File).ok_or_else(not_found);
         }
-        if spec.starts_with('/') {
+        if is_absolute_file_specifier(&spec) {
             return self
                 .resolve_path(&normalize(Path::new(&spec)), kind)
                 .map(Resolved::File)
@@ -1200,6 +1206,24 @@ mod tests {
         assert_eq!(split_package("typebox/value"), Some(("typebox", "value")));
         assert_eq!(split_package("@scope/pkg"), Some(("@scope/pkg", "")));
         assert_eq!(split_package("@scope/pkg/a/b"), Some(("@scope/pkg", "a/b")));
+    }
+
+    #[test]
+    fn absolute_file_specifier_uses_host_path_semantics() {
+        #[cfg(windows)]
+        {
+            assert!(is_absolute_file_specifier(
+                "Z:/home/oumy/.../rust/maw\\tests/anvil_sidecar.mjs"
+            ));
+            assert!(is_absolute_file_specifier(r"\\server\share\main.mjs"));
+            assert!(!is_absolute_file_specifier("./main.mjs"));
+        }
+        #[cfg(unix)]
+        {
+            assert!(is_absolute_file_specifier("/tmp/main.mjs"));
+            assert!(!is_absolute_file_specifier("Z:/home/oumy/main.mjs"));
+            assert!(!is_absolute_file_specifier("./main.mjs"));
+        }
     }
 
     #[test]

@@ -9,3 +9,18 @@ The current shim aliases win32 to POSIX, so generated code misinterprets native 
 Updated: 2026-11-05. Adapted Node v22.15.1's MIT-licensed Windows path algorithms and preserved its copyright/license in the glue. The Pi QuickJS runtime passed 1,147 fixed Node-reference cases on Linux, including drive/UNC/device paths, traversal, parsing, formatting and invalid arguments; the existing eight-test Node compatibility suite also passed. Default host selection is implemented, but native Windows and macOS execution remain unverified because the Windows host runtime does not yet compile and no macOS target run was performed. `matchesGlob` retains the prior simplified matcher and is tracked separately in vm-p62g; complete path parity is not claimed.
 
 Updated: 2026-11-05. The prior `matchesGlob` gap is addressed by the separately tracked Node-compatible bundled matcher; see NOTE-2026-11-05-PATH-GLOB.md. Native Windows/macOS runtime checks remain required.
+
+Updated: 2026-11-05. Anvil operation `07aab951-724b-426e-a467-e14b6f82851b`
+ran Maw's preserved sidecar test on OptiPlex1 with Pi's QuickJS Node-compat
+mode and failed with `ERR_MODULE_NOT_FOUND` for an absolute drive path. The
+resolved Anvil target plan includes `rust/maw/tests/anvil_sidecar.mjs` among
+the staged execution inputs, and Windows extraction completed; the remaining
+fault is Pi `loader.rs::resolve_spec`, which recognizes only slash-leading
+absolute paths before falling through to relative or package resolution. Use
+host-native `Path::is_absolute()` at that boundary so `Z:/...` resolves as a
+file on Windows while POSIX behavior stays unchanged. Verify the mixed
+separator reproduction in a Windows-gated loader test, run focused Linux
+runtime tests, and rerun the official Anvil profile build to execute the same
+Maw test on OptiPlex1. This host-loader correction is governed by EMgine
+architecture principles 3, 6, 13, 21, 24, 27 and 30; the open work is
+`vm-hbjr` / `vm-8x76`. No system Node executable is part of this path.
