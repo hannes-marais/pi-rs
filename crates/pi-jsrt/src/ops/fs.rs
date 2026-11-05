@@ -6,7 +6,10 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -85,6 +88,7 @@ thread_local! {
     static OWNED_FDS: std::cell::RefCell<Vec<i32>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
+#[cfg(unix)]
 fn stat_data(m: &fs::Metadata) -> StatData {
     let ms = |s: i64, ns: i64| s as f64 * 1000.0 + ns as f64 / 1e6;
     let birth = m
@@ -111,6 +115,37 @@ fn stat_data(m: &fs::Metadata) -> StatData {
     }
 }
 
+#[cfg(windows)]
+fn stat_data(m: &fs::Metadata) -> StatData {
+    const WINDOWS_EPOCH_TICKS: u64 = 116_444_736_000_000_000;
+    let ticks_ms = |ticks: u64| ticks.saturating_sub(WINDOWS_EPOCH_TICKS) as f64 / 10_000.0;
+    let ft = m.file_type();
+    // Node exposes POSIX-shaped mode bits on Windows. Ownership and block
+    // allocation do not exist in the Windows metadata contract, so report zero.
+    let kind = if ft.is_symlink() { 0o120000 } else if ft.is_dir() { 0o040000 } else if ft.is_file() { 0o100000 } else { 0 };
+    let readonly = m.permissions().readonly();
+    let permissions = if readonly { 0o444 } else { 0o666 };
+    let birth = ticks_ms(m.creation_time());
+    StatData {
+        dev: m.volume_serial_number().unwrap_or(0) as u64,
+        ino: m.file_index().unwrap_or(0),
+        mode: kind | permissions,
+        nlink: m.number_of_links().unwrap_or(1) as u64,
+        uid: 0,
+        gid: 0,
+        rdev: 0,
+        size: m.file_size(),
+        blksize: 0,
+        blocks: 0,
+        atime_ms: ticks_ms(m.last_access_time()),
+        mtime_ms: ticks_ms(m.last_write_time()),
+        // Windows reports creation time, not POSIX inode-change time.
+        ctime_ms: birth,
+        birthtime_ms: birth,
+    }
+}
+
+#[cfg(unix)]
 fn file_type_code(ft: &fs::FileType) -> u8 {
     use std::os::unix::fs::FileTypeExt;
     if ft.is_file() {
@@ -132,8 +167,14 @@ fn file_type_code(ft: &fs::FileType) -> u8 {
     }
 }
 
+#[cfg(windows)]
+fn file_type_code(ft: &fs::FileType) -> u8 {
+    if ft.is_file() { 1 } else if ft.is_dir() { 2 } else if ft.is_symlink() { 3 } else { 0 }
+}
+
 fn open_options(flags: &str, mode: u32) -> fs::OpenOptions {
     let mut o = fs::OpenOptions::new();
+    #[cfg(unix)]
     o.mode(mode);
     match flags {
         "r" | "rs" | "sr" => {
@@ -257,11 +298,14 @@ pub(crate) fn exec(op: FsOp) -> Result<FsOut, Error> {
                     cur = c.parent();
                 }
                 let mut b = fs::DirBuilder::new();
-                b.recursive(true).mode(mode);
+                b.recursive(true);
+                #[cfg(unix)]
+                b.mode(mode);
                 b.create(&path).map_err(|e| err(e, "mkdir", &path))?;
                 FsOut::OptStr(first.map(|p| p.display().to_string()))
             } else {
                 let mut b = fs::DirBuilder::new();
+                #[cfg(unix)]
                 b.mode(mode);
                 b.create(&path).map_err(|e| err(e, "mkdir", &path))?;
                 FsOut::OptStr(None)
