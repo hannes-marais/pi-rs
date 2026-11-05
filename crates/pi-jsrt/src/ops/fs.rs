@@ -299,13 +299,27 @@ fn file_for(fd: i32) -> std::io::Result<std::sync::Arc<parking_lot::Mutex<fs::Fi
 }
 
 #[cfg(unix)]
-fn permissions_from_mode(mode: u32) -> fs::Permissions {
-    fs::Permissions::from_mode(mode)
+fn set_path_mode(path: &str, mode: u32) -> std::io::Result<()> {
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
 }
 
 #[cfg(windows)]
-fn permissions_from_mode(mode: u32) -> fs::Permissions {
-    fs::Permissions::from_readonly(mode & 0o222 == 0)
+fn set_path_mode(path: &str, mode: u32) -> std::io::Result<()> {
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_readonly(mode & 0o222 == 0);
+    fs::set_permissions(path, permissions)
+}
+
+#[cfg(unix)]
+fn set_file_mode(file: &fs::File, mode: u32) -> std::io::Result<()> {
+    file.set_permissions(fs::Permissions::from_mode(mode))
+}
+
+#[cfg(windows)]
+fn set_file_mode(file: &fs::File, mode: u32) -> std::io::Result<()> {
+    let mut permissions = file.metadata()?.permissions();
+    permissions.set_readonly(mode & 0o222 == 0);
+    file.set_permissions(permissions)
 }
 
 /// Execute an op (blocking).
@@ -434,7 +448,7 @@ pub(crate) fn exec(op: FsOp) -> Result<FsOut, Error> {
             FsOut::Unit
         }
         Chmod(p, mode) => {
-            fs::set_permissions(&p, permissions_from_mode(mode)).map_err(|e| err(e, "chmod", &p))?;
+            set_path_mode(&p, mode).map_err(|e| err(e, "chmod", &p))?;
             FsOut::Unit
         }
         Utimes(p, atime, mtime) => {
@@ -521,7 +535,7 @@ pub(crate) fn exec(op: FsOp) -> Result<FsOut, Error> {
         }
         Fchmod(fd, mode) => {
             let f = file_for(fd).map_err(|e| io_error(&e, "fchmod", None))?;
-            f.lock().set_permissions(permissions_from_mode(mode)).map_err(|e| io_error(&e, "fchmod", None))?;
+            set_file_mode(&f.lock(), mode).map_err(|e| io_error(&e, "fchmod", None))?;
             FsOut::Unit
         }
     })
