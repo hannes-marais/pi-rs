@@ -309,22 +309,16 @@ fn op_stdin_read(_: &JsValue, _: &[JsValue], ctx: &mut Context) -> JsResult<JsVa
     if guard.is_none() {
         let (tx, rx) = std::sync::mpsc::channel::<crate::engine::Poster>();
         let spawned = std::thread::Builder::new().name("pi-jsrt-stdin".into()).spawn(move || {
+            use std::io::Read;
+            let stdin = std::io::stdin();
+            let mut stdin = stdin.lock();
             let mut buf = vec![0u8; 64 * 1024];
             while let Ok(poster) = rx.recv() {
-                // SAFETY: reading fd 0 into our buffer.
-                let n = unsafe { libc::read(0, buf.as_mut_ptr().cast(), buf.len()) };
-                let (kind, data, errno): (&'static str, Vec<u8>, i32) = if n > 0 {
-                    ("data", buf[..n as usize].to_vec(), 0)
-                } else if n == 0 {
-                    ("end", Vec::new(), 0)
-                } else {
-                    let e = std::io::Error::last_os_error();
-                    if e.kind() == std::io::ErrorKind::Interrupted || e.kind() == std::io::ErrorKind::WouldBlock {
-                        // Retry on the next request.
-                        ("retry", Vec::new(), 0)
-                    } else {
-                        ("error", Vec::new(), e.raw_os_error().unwrap_or(libc::EIO))
-                    }
+                let (kind, data, errno): (&'static str, Vec<u8>, i32) = match stdin.read(&mut buf) {
+                    Ok(0) => ("end", Vec::new(), 0),
+                    Ok(n) => ("data", buf[..n].to_vec(), 0),
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted || e.kind() == std::io::ErrorKind::WouldBlock => ("retry", Vec::new(), 0),
+                    Err(e) => ("error", Vec::new(), e.raw_os_error().unwrap_or(libc::EIO)),
                 };
                 poster.post(move |ctx| {
                     let Some(internal) = crate::engine::try_internal(ctx) else { return };
@@ -352,17 +346,23 @@ fn op_stdin_read(_: &JsValue, _: &[JsValue], ctx: &mut Context) -> JsResult<JsVa
 }
 
 /// The terminal settings before the first `setRawMode(true)`, restored at exit.
+#[cfg(unix)]
 static ORIGINAL_TERMIOS: std::sync::Mutex<Option<libc::termios>> = std::sync::Mutex::new(None);
+#[cfg(windows)]
+static ORIGINAL_CONSOLE_MODE: std::sync::Mutex<Option<u32>> = std::sync::Mutex::new(None);
 
 /// `ops.setRawMode(fd, raw) -> errno`: libuv's UV_TTY_MODE_RAW / UV_TTY_MODE_NORMAL.
 fn op_set_raw_mode(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    #[cfg(unix)]
     let fd = arg_f64(args, 0, ctx)? as i32;
     let raw = args.get_or_undefined(1).to_boolean();
     if !state(ctx).shared.options.stdin {
         return Ok(JsValue::from(0));
     }
+    #[cfg(unix)]
     let mut orig = ORIGINAL_TERMIOS.lock().unwrap_or_else(|e| e.into_inner());
     // SAFETY: termios is plain data filled by tcgetattr.
+    #[cfg(unix)]
     unsafe {
         let mut current: libc::termios = std::mem::zeroed();
         if libc::tcgetattr(fd, &mut current) != 0 {
@@ -384,14 +384,40 @@ fn op_set_raw_mode(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult
             return Ok(JsValue::from(-std::io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO)));
         }
     }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Console::{GetConsoleMode, GetStdHandle, SetConsoleMode, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT, STD_INPUT_HANDLE};
+        let mut orig = ORIGINAL_CONSOLE_MODE.lock().unwrap_or_else(|e| e.into_inner());
+        let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+        let mut current = 0u32;
+        if handle.is_null() || unsafe { GetConsoleMode(handle, &mut current) } == 0 {
+            return Ok(JsValue::from(-std::io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO)));
+        }
+        if orig.is_none() { *orig = Some(current); }
+        let next = if raw {
+            orig.unwrap_or(current) & !(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT)
+        } else {
+            orig.unwrap_or(current)
+        };
+        if unsafe { SetConsoleMode(handle, next) } == 0 {
+            return Ok(JsValue::from(-std::io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO)));
+        }
+    }
     Ok(JsValue::from(0))
 }
 
 /// Restore the terminal if `setRawMode` changed it (Node's uv_tty_reset_mode at exit).
 pub(crate) fn reset_tty_mode() {
+    #[cfg(unix)]
     if let Some(orig) = ORIGINAL_TERMIOS.lock().unwrap_or_else(|e| e.into_inner()).take() {
         // SAFETY: restoring settings read from the same descriptor.
         unsafe { libc::tcsetattr(0, libc::TCSADRAIN, &orig) };
+    }
+    #[cfg(windows)]
+    if let Some(mode) = ORIGINAL_CONSOLE_MODE.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        use windows_sys::Win32::System::Console::{GetStdHandle, SetConsoleMode, STD_INPUT_HANDLE};
+        let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+        if !handle.is_null() { unsafe { SetConsoleMode(handle, mode) }; }
     }
 }
 
