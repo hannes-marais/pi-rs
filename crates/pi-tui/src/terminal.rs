@@ -225,6 +225,13 @@ pub fn resolve_escape_timeout_ms(get_env: &dyn Fn(&str) -> Option<String>) -> f6
 #[cfg(unix)]
 pub use process::ProcessTerminal;
 
+#[cfg(windows)]
+#[path = "terminal_windows.rs"]
+mod windows_process;
+
+#[cfg(windows)]
+pub use windows_process::ProcessTerminal;
+
 #[cfg(unix)]
 mod process {
     use super::*;

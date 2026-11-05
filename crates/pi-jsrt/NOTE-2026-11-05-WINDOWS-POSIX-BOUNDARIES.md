@@ -11,3 +11,7 @@ Risks: Windows process handle transfer and ancillary socket transfer have differ
 Updated: 2026-11-05
 
 Second Anvil target result: operation `c67ab9db-9fda-4c4c-9d72-f03f60838928` built published commit `fc1b1ed23058a150e88bec207d1335cfabeb421f` and reached `pi-jsrt`, then failed with 18 Windows compile errors. The diagnostics show incomplete cfg boundaries in `node.rs` signal reset and `ops/fs.rs` symlink code, plus errors in the new Windows signal/IPC/process implementations and a misplaced Windows API import (`DuplicateHandle` is in `Win32::Foundation`). This is a target compile failure, not evidence of runtime acceptance. Repair those concrete issues; validate Linux `cargo check -p pi-jsrt`, publish, and repeat the registered Anvil release build before OptiPlex1 runtime verification. Anvil VPM `vm-wgv2` records this operation.
+
+Updated: 2026-11-05
+
+Third Anvil target result: operation `0fe60fb7-058b-439f-a733-c7b480e964f3` compiled `pi-jsrt` for Windows, then found that three Pi app entry points import `pi_tui::terminal::ProcessTerminal`, which is exported only under `cfg(unix)`. The TUI has no Windows terminal implementation yet, so the runtime port alone cannot produce a usable interactive Windows executable. Add a native Windows console-backed `ProcessTerminal` with mode save/restore, virtual-terminal input/output, buffered key/protocol parsing, resize notification, and interruptible reader shutdown. Validate the target build, then exercise a real interactive startup/shutdown on OptiPlex1; compile-only evidence is insufficient.
