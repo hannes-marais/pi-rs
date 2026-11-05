@@ -123,6 +123,15 @@ fn read_opts(args: &[JsValue], ctx: &mut Context) -> JsResult<SpawnOpts> {
     };
     let uid = num(o.get(js_string!("uid"), ctx)?, ctx)?;
     let gid = num(o.get(js_string!("gid"), ctx)?, ctx)?;
+    #[cfg(windows)]
+    if uid.is_some() || gid.is_some() || argv0.is_some() || !extra.is_empty() {
+        return Err(super::coded_error(
+            ctx,
+            "Error",
+            "spawn options uid, gid, argv0 and extra stdio are not supported by the Windows process API",
+            &[("code", js_str("ERR_FEATURE_UNAVAILABLE")), ("syscall", js_str("spawn"))],
+        ));
+    }
     Ok(SpawnOpts {
         file,
         args: argv,
@@ -138,6 +147,7 @@ fn read_opts(args: &[JsValue], ctx: &mut Context) -> JsResult<SpawnOpts> {
 }
 
 fn apply_common(cmd: &mut std::process::Command, o: &SpawnOpts) {
+    #[cfg(unix)]
     use std::os::unix::process::CommandExt;
     cmd.args(&o.args);
     if let Some(cwd) = &o.cwd {
@@ -147,15 +157,26 @@ fn apply_common(cmd: &mut std::process::Command, o: &SpawnOpts) {
         cmd.env_clear();
         cmd.envs(env.iter().map(|(k, v)| (k, v)));
     }
+    #[cfg(unix)]
     if o.detached {
         cmd.process_group(0);
     }
+    #[cfg(windows)]
+    if o.detached {
+        use std::os::windows::process::CommandExt;
+        // DETACHED_PROCESS: the child runs without inheriting the parent's console.
+        const DETACHED_PROCESS: u32 = 0x00000008;
+        cmd.creation_flags(DETACHED_PROCESS);
+    }
+    #[cfg(unix)]
     if let Some(a0) = &o.argv0 {
         cmd.arg0(a0);
     }
+    #[cfg(unix)]
     if let Some(uid) = o.uid {
         cmd.uid(uid);
     }
+    #[cfg(unix)]
     if let Some(gid) = o.gid {
         cmd.gid(gid);
     }
@@ -164,6 +185,7 @@ fn apply_common(cmd: &mut std::process::Command, o: &SpawnOpts) {
 /// Create the socket pairs for extra stdio entries; the child ends are installed at their fd
 /// numbers right before exec. Returns the parent ends and the child ends (to close after the
 /// spawn).
+#[cfg(unix)]
 type ExtraStdio = (Vec<(i32, std::os::unix::net::UnixStream)>, Vec<std::os::unix::net::UnixStream>);
 
 fn extra_stdio(cmd: &mut std::process::Command, o: &SpawnOpts) -> std::io::Result<ExtraStdio> {
@@ -202,6 +224,18 @@ fn extra_stdio(cmd: &mut std::process::Command, o: &SpawnOpts) -> std::io::Resul
         });
     }
     Ok((parents, children.into_iter().map(|(_, s)| s).collect()))
+}
+
+#[cfg(windows)]
+type ExtraStdio = (Vec<(i32, ())>, Vec<()>);
+
+#[cfg(windows)]
+fn extra_stdio(_: &mut std::process::Command, o: &SpawnOpts) -> std::io::Result<ExtraStdio> {
+    if o.extra.is_empty() {
+        Ok((Vec::new(), Vec::new()))
+    } else {
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "extra stdio requires a Windows named-pipe implementation"))
+    }
 }
 
 fn dispatch(ctx: &mut Context, id: u64, args: Vec<JsValue>) {
@@ -362,6 +396,7 @@ fn op_spawn(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValu
         });
     });
     let mut extra = Vec::new();
+    #[cfg(unix)]
     for (fd, parent) in extra_parents {
         let channel = super::ipc::start(ctx, parent).map_err(|e| super::throw_io(ctx, &e, "socketpair", None))?;
         extra.push(JsValue::from(fd));
@@ -400,9 +435,31 @@ fn op_child_kill(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<J
     let sig = args.get_or_undefined(1).to_number(ctx).unwrap_or(15.0) as i32;
     let pid = CHILDREN.with(|c| c.borrow().get(&id).map(|ch| ch.pid));
     let Some(pid) = pid else { return Ok(JsValue::from(false)) };
-    // SAFETY: plain syscall.
-    let r = unsafe { libc::kill(pid, sig) };
-    Ok(JsValue::from(r == 0))
+    #[cfg(unix)]
+    {
+        // SAFETY: plain syscall.
+        let r = unsafe { libc::kill(pid, sig) };
+        Ok(JsValue::from(r == 0))
+    }
+    #[cfg(windows)]
+    {
+        let _ = sig; // Windows terminates a process; POSIX signal numbers have no equivalent.
+        Ok(JsValue::from(terminate_pid(pid as u32, 1)))
+    }
+}
+
+#[cfg(windows)]
+fn terminate_pid(pid: u32, exit_code: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+    // SAFETY: OpenProcess returns an owned handle which is closed on every successful open.
+    let process = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
+    if process.is_null() || process == INVALID_HANDLE_VALUE {
+        return false;
+    }
+    let ok = unsafe { TerminateProcess(process, exit_code) } != 0;
+    unsafe { CloseHandle(process) };
+    ok
 }
 
 /// `ops.spawnSync(file, args, opts, input, timeoutMs, maxBuffer)`
@@ -457,8 +514,13 @@ fn op_spawn_sync(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<J
         }
         if timeout > 0.0 && start.elapsed() > Duration::from_millis(timeout as u64) && !timed_out {
             timed_out = true;
-            // SAFETY: plain syscall.
+            #[cfg(unix)]
             unsafe { libc::kill(pid as i32, kill_signal) };
+            #[cfg(windows)]
+            {
+                let _ = kill_signal;
+                let _ = child.kill();
+            }
         }
         std::thread::sleep(Duration::from_millis(2));
     };
@@ -485,8 +547,11 @@ pub(crate) fn teardown(_ctx: &mut Context) {
     let children = CHILDREN.with(|c| std::mem::take(&mut *c.borrow_mut()));
     for (_, ch) in children {
         if !ch.detached && ch.pid > 0 {
+            #[cfg(unix)]
             // SAFETY: plain syscall.
             unsafe { libc::kill(ch.pid, libc::SIGTERM) };
+            #[cfg(windows)]
+            let _ = terminate_pid(ch.pid as u32, 1);
         }
     }
 }
