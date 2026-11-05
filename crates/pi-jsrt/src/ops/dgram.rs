@@ -88,6 +88,7 @@ fn op_dgram_create(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult
     let domain = if ipv6 { Domain::IPV6 } else { Domain::IPV4 };
     let raw = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP)).map_err(|e| super::throw_io(ctx, &e, "socket", None))?;
     let _ = raw.set_nonblocking(true);
+    #[cfg(unix)]
     let _ = raw.set_cloexec(true);
     SOCKETS.with(|s| s.borrow_mut().insert(id, Udp { ipv6, sock: None, raw: Some(raw), stop: CancellationToken::new() }));
     Ok(JsValue::from(id as f64))
@@ -164,8 +165,13 @@ fn op_dgram_bind(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<J
         if reuse_addr {
             raw.set_reuse_address(true)?;
         }
+        #[cfg(unix)]
         if reuse_port {
             raw.set_reuse_port(true)?;
+        }
+        #[cfg(windows)]
+        if reuse_port {
+            return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "reusePort is not supported by Windows UDP sockets"));
         }
         if ipv6 && ipv6_only {
             raw.set_only_v6(true)?;
@@ -292,6 +298,7 @@ fn op_dgram_connect(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResul
 /// `ops.dgramDisconnect(id)`: connect to AF_UNSPEC.
 fn op_dgram_disconnect(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let id = arg_f64(args, 0, ctx)? as u64;
+    #[cfg(unix)]
     with_sock(id, |s| {
         use std::os::fd::AsRawFd;
         // SAFETY: AF_UNSPEC sockaddr dissolves the association (connect(2)).
@@ -299,6 +306,17 @@ fn op_dgram_disconnect(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsRe
             let mut addr: libc::sockaddr = std::mem::zeroed();
             addr.sa_family = libc::AF_UNSPEC as libc::sa_family_t;
             libc::connect(s.as_raw_fd(), &addr, std::mem::size_of::<libc::sockaddr>() as libc::socklen_t);
+        }
+    });
+    #[cfg(windows)]
+    with_sock(id, |s| {
+        use std::os::windows::io::AsRawSocket;
+        use windows_sys::Win32::Networking::WinSock::{AF_UNSPEC, SOCKADDR, connect};
+        // Winsock UDP disconnects a connected datagram socket with connect(AF_UNSPEC).
+        unsafe {
+            let mut addr: SOCKADDR = std::mem::zeroed();
+            addr.sa_family = AF_UNSPEC;
+            let _ = connect(s.as_raw_socket() as usize, &addr, std::mem::size_of::<SOCKADDR>() as i32);
         }
     });
     Ok(JsValue::undefined())
