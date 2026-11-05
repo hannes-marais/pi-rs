@@ -8,6 +8,36 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
 
+#[cfg(unix)]
+type NetSocket = std::os::fd::RawFd;
+#[cfg(windows)]
+type NetSocket = std::os::windows::io::RawSocket;
+
+#[cfg(unix)]
+fn raw_listener(listener: &std::net::TcpListener) -> NetSocket { use std::os::fd::AsRawFd; listener.as_raw_fd() }
+#[cfg(windows)]
+fn raw_listener(listener: &std::net::TcpListener) -> NetSocket { use std::os::windows::io::AsRawSocket; listener.as_raw_socket() }
+#[cfg(unix)]
+fn listener_from_raw(raw: NetSocket) -> std::net::TcpListener { use std::os::fd::FromRawFd; unsafe { std::net::TcpListener::from_raw_fd(raw) } }
+#[cfg(windows)]
+fn listener_from_raw(raw: NetSocket) -> std::net::TcpListener { use std::os::windows::io::FromRawSocket; unsafe { std::net::TcpListener::from_raw_socket(raw) } }
+#[cfg(unix)]
+fn stream_from_raw(raw: NetSocket) -> std::net::TcpStream { use std::os::fd::FromRawFd; unsafe { std::net::TcpStream::from_raw_fd(raw) } }
+#[cfg(windows)]
+fn stream_from_raw(raw: NetSocket) -> std::net::TcpStream { use std::os::windows::io::FromRawSocket; unsafe { std::net::TcpStream::from_raw_socket(raw) } }
+#[cfg(unix)]
+fn listener_into_raw(listener: std::net::TcpListener) -> NetSocket { use std::os::fd::IntoRawFd; listener.into_raw_fd() }
+#[cfg(windows)]
+fn listener_into_raw(listener: std::net::TcpListener) -> NetSocket { use std::os::windows::io::IntoRawSocket; listener.into_raw_socket() }
+#[cfg(unix)]
+fn stream_into_raw(stream: std::net::TcpStream) -> NetSocket { use std::os::fd::IntoRawFd; stream.into_raw_fd() }
+#[cfg(windows)]
+fn stream_into_raw(stream: std::net::TcpStream) -> NetSocket { use std::os::windows::io::IntoRawSocket; stream.into_raw_socket() }
+#[cfg(unix)]
+fn stream_raw(stream: &tokio::net::TcpStream) -> NetSocket { use std::os::fd::AsRawFd; stream.as_raw_fd() }
+#[cfg(windows)]
+fn stream_raw(stream: &tokio::net::TcpStream) -> NetSocket { use std::os::windows::io::AsRawSocket; stream.as_raw_socket() }
+
 use crate::js::{Context, JsArgs, JsResult, JsValue, js_string};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
@@ -27,12 +57,12 @@ struct SocketCtl {
     tx: mpsc::UnboundedSender<SockMsg>,
     stop: CancellationToken,
     /// The stream's descriptor (owned by the reader/writer tasks), for handle passing.
-    fd: i32,
+    fd: NetSocket,
 }
 
 struct ServerCtl {
     stop: CancellationToken,
-    fd: i32,
+    fd: NetSocket,
 }
 
 thread_local! {
@@ -90,8 +120,7 @@ fn error_object(ctx: &mut Context, e: &std::io::Error, syscall: &str, address: O
 
 /// Start the reader and writer tasks of a connected stream and register it under `id`.
 fn start_socket(tokio: &tokio::runtime::Handle, poster: Poster, id: u64, stream: tokio::net::TcpStream) -> SocketCtl {
-    use std::os::fd::AsRawFd;
-    let fd = stream.as_raw_fd();
+    let fd = stream_raw(&stream);
     let (tx, mut rx) = mpsc::unbounded_channel::<SockMsg>();
     let stop = CancellationToken::new();
     let (mut reader, mut writer) = stream.into_split();
@@ -198,14 +227,13 @@ fn op_net_listen(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<J
 /// a bare descriptor handed to JS ("rawconnection" events), as cluster's round-robin primary
 /// passes connections to workers.
 fn serve(ctx: &mut Context, listener: std::net::TcpListener, raw: bool, host: &str, port: u16) -> JsResult<JsValue> {
-    use std::os::fd::{AsRawFd, IntoRawFd};
     let local = listener.local_addr().ok();
     let st = state(ctx);
     if let Err(e) = listener.set_nonblocking(true) {
         let err = error_object(ctx, &e, "listen", Some((host, port)))?;
         return object(ctx, vec![("error", err)]);
     }
-    let fd = listener.as_raw_fd();
+    let fd = raw_listener(&listener);
     let listener = {
         let _guard = st.tokio.enter();
         match tokio::net::TcpListener::from_std(listener) {
@@ -234,10 +262,10 @@ fn serve(ctx: &mut Context, listener: std::net::TcpListener, raw: bool, host: &s
             let local = stream.local_addr().ok();
             if raw {
                 let Ok(std_stream) = stream.into_std() else { continue };
-                let raw_fd = std_stream.into_raw_fd();
+                let raw_fd = stream_into_raw(std_stream);
                 poster.post(move |ctx| {
                     if let Ok(info) = endpoints(ctx, local, Some(remote)) {
-                        dispatch(ctx, id, vec![js_str("rawconnection"), JsValue::from(raw_fd), info]);
+                        dispatch(ctx, id, vec![js_str("rawconnection"), JsValue::from(raw_fd as f64), info]);
                     }
                 });
                 continue;
@@ -273,20 +301,18 @@ fn serve(ctx: &mut Context, listener: std::net::TcpListener, raw: bool, host: &s
 
 /// `ops.netListenFd(fd, raw)`: listen on an inherited/passed listening descriptor (owned from now on).
 fn op_net_listen_fd(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
-    use std::os::fd::FromRawFd;
-    let fd = arg_f64(args, 0, ctx)? as i32;
+    let fd = arg_f64(args, 0, ctx)? as NetSocket;
     let raw = args.get_or_undefined(1).to_boolean();
     // SAFETY: the descriptor was passed to this runtime, which takes ownership of it.
-    let listener = unsafe { std::net::TcpListener::from_raw_fd(fd) };
+    let listener = listener_from_raw(fd);
     serve(ctx, listener, raw, "", 0)
 }
 
 /// `ops.netAdoptFd(fd) -> { id, ...endpoints } | { error }`: a connected stream from a descriptor.
 fn op_net_adopt_fd(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
-    use std::os::fd::FromRawFd;
-    let fd = arg_f64(args, 0, ctx)? as i32;
+    let fd = arg_f64(args, 0, ctx)? as NetSocket;
     // SAFETY: the descriptor was passed to this runtime, which takes ownership of it.
-    let std_stream = unsafe { std::net::TcpStream::from_raw_fd(fd) };
+    let std_stream = stream_from_raw(fd);
     let _ = std_stream.set_nonblocking(true);
     let st = state(ctx);
     let stream = {
@@ -315,7 +341,6 @@ fn op_net_adopt_fd(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult
 /// `ops.netBindFd(host, port) -> { fd, address, port, family } | { error }`: a listening socket
 /// that nobody accepts on here (cluster's shared handle: workers listen on its descriptor).
 fn op_net_bind_fd(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
-    use std::os::fd::IntoRawFd;
     let host = arg_string(args, 0, ctx)?;
     let port = arg_f64(args, 1, ctx)? as u16;
     let host = if host.is_empty() { "0.0.0.0".to_string() } else { host };
@@ -326,11 +351,11 @@ fn op_net_bind_fd(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<
     match bound {
         Ok(l) => {
             let local = l.local_addr().unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], port)));
-            let fd = l.into_raw_fd();
+            let fd = listener_into_raw(l);
             object(
                 ctx,
                 vec![
-                    ("fd", JsValue::from(fd)),
+                    ("fd", JsValue::from(fd as f64)),
                     ("address", js_str(&local.ip().to_string())),
                     ("port", JsValue::from(local.port())),
                     ("family", js_str(family(&local))),
@@ -348,7 +373,7 @@ fn op_net_bind_fd(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<
 fn op_net_fd(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let id = arg_f64(args, 0, ctx)? as u64;
     let fd = SOCKETS.with(|s| s.borrow().get(&id).map(|c| c.fd)).or_else(|| SERVERS.with(|s| s.borrow().get(&id).map(|c| c.fd)));
-    Ok(JsValue::from(fd.unwrap_or(-1)))
+    Ok(JsValue::from(fd.map(|value| value as f64).unwrap_or(-1.0)))
 }
 
 /// `ops.netConnect(host, port) -> id`; emits `connect` (with endpoints) or `error`.
