@@ -218,6 +218,7 @@ async fn child_process_apis() {
 #[tokio::test]
 async fn events_util_buffer_crypto() {
     let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("url file.txt"), "read through file URL").unwrap();
     let rt = rt_in(dir.path());
     let v = eval_module(
         &rt,
@@ -265,8 +266,12 @@ async fn events_util_buffer_crypto() {
             uuid: /^[0-9a-f-]{36}$/.test(randomUUID()), rb: crypto.randomBytes(8).length,
             decoded, assertMsg,
             f2p: fileURLToPath("file:///tmp/a%20b.txt"), p2f: pathToFileURL("/tmp/a b.txt").href,
+            winF2p: process.platform === "win32" ? fileURLToPath("file:///C:/Users/hannes/AppData/Local/Temp/a%20b.txt") : null,
+            winUncF2p: process.platform === "win32" ? fileURLToPath("file://server/share/folder/file.txt") : null,
             winP2f: pathToFileURL("C:\\Users\\hannes\\AppData\\Local\\Temp\\a b.txt").href,
+            winUncP2f: pathToFileURL("\\\\server\\share\\folder\\file.txt").href,
             platform: process.platform,
+            fileUrlRead: req("node:fs").readFileSync(pathToFileURL(req("node:path").join(process.cwd(), "url file.txt")), "utf8"),
             types: [util.types.isPromise(Promise.resolve()), util.types.isDate(new Date())],
             reqPath: typeof req("node:path").join,
             isDeep: util.isDeepStrictEqual([1, 2], [1, 2]),
@@ -300,8 +305,12 @@ async fn events_util_buffer_crypto() {
     assert_eq!(v["assertMsg"], json!("ERR_ASSERTION"));
     assert_eq!(v["f2p"], json!("/tmp/a b.txt"));
     assert_eq!(v["p2f"], json!("file:///tmp/a%20b.txt"));
+    assert_eq!(v["fileUrlRead"], json!("read through file URL"));
     if v["platform"] == "win32" {
         assert_eq!(v["winP2f"], json!("file:///C:/Users/hannes/AppData/Local/Temp/a%20b.txt"));
+        assert_eq!(v["winF2p"], json!("C:\\Users\\hannes\\AppData\\Local\\Temp\\a b.txt"));
+        assert_eq!(v["winUncP2f"], json!("file://server/share/folder/file.txt"));
+        assert_eq!(v["winUncF2p"], json!("\\\\server\\share\\folder\\file.txt"));
     }
     assert_eq!(v["types"], json!([true, true]));
     assert_eq!(v["reqPath"], json!("function"));

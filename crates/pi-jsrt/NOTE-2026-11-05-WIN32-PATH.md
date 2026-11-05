@@ -35,3 +35,19 @@ source staging and absolute module lookup are functioning. Add host-aware
 Windows file URL conversion and regression coverage, preserving POSIX URL
 behavior; then rerun the same full Anvil profile build on OptiPlex1. The
 verification remains the Pi QuickJS runtime, not a system Node executable.
+
+Updated: 2026-11-05. The next official Anvil run
+`6f1eee23-0afb-4220-a7c5-e5ce8b089e2e` used the pushed
+`pathToFileURL` correction and passed Maw's
+`anvil_sidecar_emits_and_executes_its_complete_offline_closure` test on
+OptiPlex1. It then failed `json_reader_matches_the_replaced_reader` because
+`node:fs::toPath` converts a file URL with only `decodeURIComponent(url.pathname)`;
+for `file:///Z:/...`, that leaves `/Z:/...`, which Windows rejects (EIO 123).
+The current `node:url.fileURLToPath` helper also returned the raw `/Z:/...`
+pathname and rejected UNC hosts. The correction now performs Windows drive and
+UNC conversion there and routes fs URL inputs through that shared helper. The
+Linux node compatibility test passed with a file URL read round trip and
+unchanged POSIX URL output. The Windows drive assertions still require the
+next official full profile run on OptiPlex1. Operation
+`6f1eee23-0afb-4220-a7c5-e5ce8b089e2e` failed overall; no installation was
+applied.

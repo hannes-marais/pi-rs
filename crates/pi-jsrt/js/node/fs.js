@@ -44,7 +44,7 @@ function toPath(p, name = "path") {
       err.code = "ERR_INVALID_URL_SCHEME";
       throw err;
     }
-    return decodeURIComponent(p.pathname);
+    return internal.requireBuiltin("url").fileURLToPath(p);
   }
   const err = new TypeError(`The "${name}" argument must be of type string or an instance of Buffer or URL. Received ${p === null ? "null" : typeof p}`);
   err.code = "ERR_INVALID_ARG_TYPE";

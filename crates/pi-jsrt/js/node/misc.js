@@ -16,7 +16,7 @@ function fileURLToPath(url) {
     err.code = "ERR_INVALID_URL_SCHEME";
     throw err;
   }
-  if (u.hostname !== "" && u.hostname !== "localhost") {
+  if (u.hostname !== "" && u.hostname !== "localhost" && process.platform !== "win32") {
     const err = new TypeError(`File URL host must be "localhost" or empty on ${process.platform}`);
     err.code = "ERR_INVALID_FILE_URL_HOST";
     throw err;
@@ -27,7 +27,15 @@ function fileURLToPath(url) {
     err.code = "ERR_INVALID_FILE_URL_PATH";
     throw err;
   }
-  return decodeURIComponent(p);
+  let decoded = decodeURIComponent(p);
+  if (process.platform === "win32") {
+    if (u.hostname !== "" && u.hostname !== "localhost") {
+      return `\\\\${u.hostname}${decoded.replace(/\//g, "\\")}`;
+    }
+    if (/^\/[A-Za-z]:/.test(decoded)) decoded = decoded.slice(1);
+    return decoded.replace(/\//g, "\\");
+  }
+  return decoded;
 }
 
 function pathToFileURL(p) {
@@ -43,7 +51,9 @@ function pathToFileURL(p) {
     .split("/")
     .map((seg) => encodeURIComponent(seg).replace(/%40/g, "@").replace(/%3A/g, ":").replace(/%2B/g, "+").replace(/%2C/g, ",").replace(/%3D/g, "=").replace(/%24/g, "$").replace(/%26/g, "&"))
     .join("/");
-  const prefix = windowsPath && /^[A-Za-z]:\//.test(resolved) ? "file:///" : "file://";
+  let prefix = "file://";
+  if (windowsPath && /^[A-Za-z]:\//.test(resolved)) prefix = "file:///";
+  else if (windowsPath && resolved.startsWith("//")) prefix = "file:";
   return new internal.URL(`${prefix}${encoded}`);
 }
 
