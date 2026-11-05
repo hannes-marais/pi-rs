@@ -374,9 +374,10 @@ impl Terminal for ProcessTerminal {
             let stop = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
             if !stop.is_null() {
                 let me = self.clone();
+                let stop_token = stop as isize;
                 let thread = std::thread::Builder::new()
                     .name("pi-tui-windows-stdin".into())
-                    .spawn(move || me.reader_loop(stop as isize));
+                    .spawn(move || me.reader_loop(stop_token));
                 if let Ok(thread) = thread {
                     state.reader = Some((stop as isize, thread));
                 } else {

@@ -17,3 +17,7 @@ Implementation update: `terminal_windows.rs` now exports a Windows `ProcessTermi
 Updated: 2026-11-05
 
 Anvil operation `532f966b-267f-4658-a06f-c74e99525e88` compiled the new Windows TUI module and found one error at reader-thread creation: Windows `HANDLE` is a raw pointer and is not `Send`. Keep the handle stored as an integer token across the thread boundary and cast to `HANDLE` only inside the Windows reader.
+
+Updated: 2026-11-05
+
+Anvil operation `0704ac13-1dcf-4f94-93c9-42e74af81451` confirmed the first HANDLE fix was incomplete: casting inside the `move` closure still caused the raw pointer to be captured. Convert to `isize` before constructing the closure so only the integer crosses the thread boundary.
